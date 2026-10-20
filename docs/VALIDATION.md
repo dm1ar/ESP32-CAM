@@ -247,3 +247,44 @@ toward the previous hardware setup, but does not isolate board, sensor,
 ribbon, connection or power as the cause. Session-local evidence:
 /tmp/esp32-cam-stream-recovery-test.json and its -uart.log companion.
 This supersedes the replacement's pending-runtime notes above.
+
+
+Snapshot/shared-frame implementation (2026-10-20, branch rtsp): adds
+GET /capture on port 80, image/jpeg with no-store. Camera ownership after
+boot moves from port-81 HTTP to a dedicated camera_owner FreeRTOS worker.
+Session begin/finish and capture are serialized through a static request queue;
+three bounded 512 KiB startup PSRAM allocations hold latest, stream and
+snapshot copies. Driver frames return before HTTP sends. Active snapshots
+reuse the latest image at matching settings; idle snapshots wake, capture and
+return to standby before sending. Snapshots do not extend auto-off or enter
+stream FPS/counters. HTTP 500 on invalid/oversize/capture failure. D09 records
+the bounded allocation exception. One direct MJPEG viewer remains supported;
+RTSP is not implemented. Sanitized production FrameStore lifecycle/copy tests,
+browser/config tests and the ESP-IDF build pass. tools/check_camera.py provides
+original-JPEG tests across all resolutions, idle snapshots and concurrent
+stream/snapshots. Upload and hardware validation of this change are pending.
+This supersedes earlier instructions assigning camera ownership to port 81.
+
+
+Snapshot firmware upload: bootloader confirmed replacement MAC
+a0:dd:6c:79:56:74. Complete IDF flash at 115200 baud succeeded; unchanged
+bootloader/partition content was verified and application write hash passed.
+Separate verify-flash matched all 1,053,520 application bytes at 0x10000.
+Board left in bootloader; GPIO0 removal and reset requested before the
+new tools/check_camera.py simultaneous snapshot/stream hardware test.
+
+
+Snapshot hardware acceptance (2026-10-20): after manual reset, UART DHCP
+confirmed ESP32-CAM02 at http://192.168.1.128/. tools/check_camera.py passed
+all five resolutions (QVGA/VGA/SVGA/XGA/UXGA): 30 original JPEG snapshots
+(10 idle, 20 during streaming) and 47 original MJPEG frames decoded completely
+with correct dimensions. Snapshot responses returned image/jpeg and no-store.
+Idle snapshots did not increment stream counters; simultaneous snapshots kept
+streaming active without extending the countdown. Each cycle restored standby,
+zero FPS, modem sleep and camera_error_code=0. Final HTTP status confirms
+VGA/12, standby and no camera error. Runtime log:
+/tmp/esp32-cam-snapshot-runtime.log; boot log:
+/tmp/esp32-cam-snapshot-boot.log (session-local evidence). Firmware remains
+running with auto-off enabled at 20 minutes. Full-duration expiry and actual
+openHAB integration remain untested. Snapshot hardware acceptance is now
+passed, superseding the pending-upload/runtime notes above.

@@ -1,16 +1,16 @@
 #ifndef ESP32_CAM_WEB_SERVER_HPP
 #define ESP32_CAM_WEB_SERVER_HPP
 
-#include "camera.hpp"
+#include "frame_service.hpp"
 #include "esp_http_server.h"
 #include "shared_state.hpp"
 
 namespace cam {
 // The two SDK server tasks borrow this application-lifetime object. Camera
-// access is confined to stream(); all other handlers use locked snapshots.
+// hardware belongs to FrameService; handlers use independent JPEG copies.
 class WebServer final {
 public:
-    WebServer(Camera& camera, SharedState& state) noexcept : camera_{camera}, state_{state} {}
+    WebServer(FrameService& frames, SharedState& state) noexcept : frames_{frames}, state_{state} {}
     WebServer(const WebServer&) = delete;
     WebServer& operator=(const WebServer&) = delete;
     [[nodiscard]] esp_err_t start() noexcept;
@@ -26,13 +26,14 @@ private:
         return (self.*Handler)(request);
     }
     [[nodiscard]] esp_err_t index(httpd_req_t* request) noexcept;
+    [[nodiscard]] esp_err_t capture(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t health(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t status(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t control(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t stop(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t stream(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t sendFrame(httpd_req_t* request, RateMeter& meter) noexcept;
-    Camera& camera_;
+    FrameService& frames_;
     SharedState& state_;
     httpd_handle_t pageServer_{nullptr};
     httpd_handle_t streamServer_{nullptr};

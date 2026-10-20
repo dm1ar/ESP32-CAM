@@ -23,7 +23,7 @@ private:
     camera_fb_t* const frame_;
 };
 
-// After boot, only the port-81 HTTP task may access this object or camera APIs.
+// After boot, only the capture worker may access this object or camera APIs.
 // The page task submits settings through SharedState instead of touching GPIO.
 class Camera final {
 public:

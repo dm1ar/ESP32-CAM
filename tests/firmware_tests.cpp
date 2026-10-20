@@ -7,6 +7,8 @@
 #include <thread>
 #include <type_traits>
 #include "camera.hpp"
+#include "frame_store.hpp"
+#include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "model.hpp"
 #include "shared_state.hpp"
@@ -236,8 +238,74 @@ void testCamera()
     require(camera.prepare({}) == ESP_OK, "next browser wake can recover");
     require(camera.sleep() == ESP_OK, "final camera cleanup");
 }
+void testFrameStore()
+{
+    driver = {};
+    cam::Camera camera{};
+    cam::SharedState state{};
+    cam::FrameStore frames{camera, state};
+    std::array<std::uint8_t, 8U> jpeg{0xFFU, 0xD8U, 1U, 2U, 3U, 4U, 0xFFU, 0xD9U};
+    driver.frame = {jpeg.data(), jpeg.size(), 640U, 480U, PIXFORMAT_JPEG};
+    require(frames.start() == ESP_OK, "allocate bounded PSRAM copies");
+    require(frames.capture(true) == ESP_OK, "idle snapshot wakes and captures");
+    require(driver.borrowed == 0U && !driver.initialized && driver.power == 1U,
+            "idle snapshot returns frame and powers down before send");
+    require(frames.snapshotView().size == jpeg.size() && frames.snapshotView().data[2U] == 1U,
+            "snapshot owns driver-independent bytes");
+    jpeg[2U] = 42U;
+    require(frames.snapshotView().data[2U] == 1U, "returned driver frame cannot mutate snapshot");
+    require(!state.snapshot().streaming && state.snapshot().framesSent == 0U
+            && state.snapshot().cameraState == cam::CameraState::standby,
+            "snapshot does not start a stream or count as transmitted stream FPS");
+    state.begin(100U);
+    require(frames.capture(false) == ESP_OK, "capture stream copy");
+    const auto returned = driver.returned;
+    require(frames.capture(true) == ESP_OK && driver.returned == returned,
+            "active snapshot reuses published frame without extra capture or reinit");
+    require(frames.streamView().data != frames.snapshotView().data,
+            "slow HTTP sends use separate buffers");
+    jpeg[2U] = 99U;
+    require(frames.capture(false) == ESP_OK && frames.streamView().data[2U] == 99U,
+            "next stream frame updates its copy");
+    require(frames.snapshotView().data[2U] == 42U,
+            "new stream capture cannot overwrite snapshot being sent");
+    require(state.snapshot().streamDeadlineUs == 1'200'000'100,
+            "snapshot sharing does not extend stream deadline");
+    require(state.select({cam::Resolution::qvga, 12U}), "select new settings during stream");
+    const auto initCalls = driver.initCalls;
+    require(frames.capture(true) == ESP_OK && driver.initCalls == initCalls + 1U,
+            "snapshot never reuses old settings after selection changes");
+    require(frames.sleep() == ESP_OK, "worker standby returns all leases");
+    state.finish(false);
+    driver.missingFrame = true;
+    require(frames.capture(true) == ESP_ERR_INVALID_STATE, "snapshot capture failure reported");
+    require(!driver.initialized && driver.power == 1U && driver.borrowed == 0U,
+            "failed snapshot cleans up camera");
+    require(frames.snapshotView().size == 0U, "failure cannot expose stale snapshot");
+    driver.missingFrame = false;
+    driver.frame.len = cam::JpegBuffer::capacity + 1U;
+    require(frames.capture(true) == ESP_ERR_INVALID_SIZE, "oversize JPEG rejected before copy");
+    require(!driver.initialized && driver.borrowed == 0U, "oversize JPEG returns lease and sleeps");
+    driver.frame.len = jpeg.size();
+    require(frames.capture(true) == ESP_OK && state.snapshot().cameraError == 0,
+            "snapshot recovers after previous failure");
+    driver.failures = 3U;
+    require(frames.capture(true) == ESP_FAIL && !driver.initialized && driver.power == 1U,
+            "initialization failure leaves snapshot camera asleep");
+    cam::JpegBuffer buffer{};
+    require(!buffer.assign({jpeg.data(), jpeg.size(), 640U, 480U}),
+            "unallocated output rejects copy");
+    require(buffer.allocate() && !buffer.assign({nullptr, 1U, 640U, 480U}),
+            "null source rejected");
+}
 } // namespace
 
+void* heap_caps_malloc(std::size_t size, std::uint32_t caps)
+{
+    require(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT), "JPEG copies use PSRAM");
+    return std::malloc(size);
+}
+void heap_caps_free(void* pointer) { std::free(pointer); }
 const char* esp_err_to_name(esp_err_t) { return "injected failure"; }
 esp_err_t gpio_set_direction(gpio_num_t, gpio_mode_t) { return ESP_OK; }
 esp_err_t gpio_set_level(gpio_num_t, std::uint32_t level) { driver.power = level; return ESP_OK; }
@@ -285,5 +353,6 @@ int main()
     testState();
     testStreamDeadline();
     testCamera();
-    std::puts("PASS: settings, measured rates, shared state, concurrency, camera lifecycle");
+    testFrameStore();
+    std::puts("PASS: settings, measured rates, shared state, concurrency, camera lifecycle, shared JPEG ownership and snapshots");
 }

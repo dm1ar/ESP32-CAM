@@ -13,7 +13,7 @@ esp_err_t Application::run() noexcept
     if (result != ESP_OK) { return result; }
     result = gpio_set_direction(board::flashLamp, GPIO_MODE_OUTPUT);
     if (result != ESP_OK) { return result; }
-    // Boot has exclusive ownership until the stream HTTP task is started.
+    // Boot has exclusive ownership until the capture worker is started.
     result = camera_.sleep();
     if (result != ESP_OK) { return result; }
     esp_chip_info_t chip{};
@@ -26,6 +26,8 @@ esp_err_t Application::run() noexcept
     }
     ESP_LOGI("app", "PSRAM: %zu bytes", esp_psram_get_size());
     result = network_.start();
+    if (result != ESP_OK) { return result; }
+    result = frames_.start();
     if (result != ESP_OK) { return result; }
     result = web_.start();
     if (result == ESP_OK) {

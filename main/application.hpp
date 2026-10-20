@@ -11,7 +11,7 @@ namespace cam {
 // dependencies exist before WebServer and all callback references stay valid.
 class Application final {
 public:
-    Application() noexcept : web_{camera_, state_} {}
+    Application() noexcept : web_{frames_, state_} {}
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
     [[nodiscard]] esp_err_t run() noexcept;
@@ -19,6 +19,7 @@ private:
     Network network_{};
     Camera camera_{};
     SharedState state_{Network::streamPolicy()};
+    FrameService frames_{camera_, state_};
     WebServer web_;
 };
 } // namespace cam

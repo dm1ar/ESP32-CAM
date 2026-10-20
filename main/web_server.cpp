@@ -36,30 +36,22 @@ constexpr char tag[]{"web"};
 
 // Created before switching power modes. Even an early header or Wi-Fi failure
 // returns the camera to PWDN, resets rates, and attempts minimum modem sleep.
-// All FrameLease objects are destroyed before this outer guard is destroyed.
+// The worker returns every driver FrameLease before replying to a request.
 class StreamSession final {
 public:
-    StreamSession(Camera& camera, SharedState& state) noexcept : camera_{camera}, state_{state}
+    StreamSession(FrameService& frames, SharedState& state) noexcept : frames_{frames}, state_{state}
     {
-        state_.begin(esp_timer_get_time());
+        result_ = frames_.begin();
     }
     ~StreamSession() noexcept
     {
-        // Preserve the timeout reason even if a socket failure ended the
-        // final send after the deadline. Only this task touches the camera.
-        static_cast<void>(state_.shouldStop(esp_timer_get_time()));
-        const auto cameraResult = camera_.sleep();
-        const auto wifiResult = Network::setStreamingPower(false);
-        if (cameraResult != ESP_OK) {
-            state_.cameraFailed(cameraResult);
-            ESP_LOGE(tag, "Camera standby failed: %s", esp_err_to_name(cameraResult));
+        const auto result = frames_.finish(failed_);
+        if (result != ESP_OK) {
+            ESP_LOGE(tag, "Camera standby failed: %s", esp_err_to_name(result));
         }
-        if (wifiResult != ESP_OK) {
-            ESP_LOGW(tag, "Wi-Fi modem sleep failed: %s", esp_err_to_name(wifiResult));
-        }
-        state_.finish(failed_ || (cameraResult != ESP_OK));
         ESP_LOGI(tag, "Stream ended; standby requested");
     }
+    [[nodiscard]] esp_err_t result() const noexcept { return result_; }
     StreamSession(const StreamSession&) = delete;
     StreamSession& operator=(const StreamSession&) = delete;
     void fail(esp_err_t error) noexcept
@@ -68,9 +60,10 @@ public:
         state_.cameraFailed(error);
     }
 private:
-    Camera& camera_;
+    FrameService& frames_;
     SharedState& state_;
     bool failed_{false};
+    esp_err_t result_{ESP_OK};
 };
 } // namespace
 
@@ -80,6 +73,19 @@ esp_err_t WebServer::index(httpd_req_t* request) noexcept
     // The embedding appends one NUL. Linker-symbol subtraction is reviewed D03.
     const auto length = indexHtmlEnd - indexHtmlStart - 1;
     return (result == ESP_OK) ? httpd_resp_send(request, indexHtmlStart, length) : result;
+}
+
+esp_err_t WebServer::capture(httpd_req_t* request) noexcept
+{
+    const auto result = frames_.capture(true);
+    if (result != ESP_OK) {
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                  "Snapshot failed; see /status camera_error_code");
+    }
+    const auto frame = frames_.snapshotView();
+    const auto headers = responseHeaders(request, "image/jpeg");
+    return (headers == ESP_OK) ? httpd_resp_send(request,
+        reinterpret_cast<const char*>(frame.data), static_cast<ssize_t>(frame.size)) : headers;
 }
 
 esp_err_t WebServer::health(httpd_req_t* request) noexcept
@@ -175,13 +181,9 @@ esp_err_t WebServer::status(httpd_req_t* request) noexcept
 
 esp_err_t WebServer::sendFrame(httpd_req_t* request, RateMeter& meter) noexcept
 {
-    const FrameLease lease{};
-    const auto* const frame = lease.get();
-    if ((frame == nullptr) || (frame->format != PIXFORMAT_JPEG) || (frame->buf == nullptr)
-        || (frame->len == 0U)) {
-        state_.captureFailed();
-        return ESP_ERR_INVALID_STATE;
-    }
+    const auto captured = frames_.capture(false);
+    if (captured != ESP_OK) { return captured; }
+    const auto frame = frames_.streamView();
     // Capture can block. If the deadline or Stop arrived during capture,
     // return this lease without starting another network transmission.
     if (state_.shouldStop(esp_timer_get_time())) {
@@ -190,13 +192,13 @@ esp_err_t WebServer::sendFrame(httpd_req_t* request, RateMeter& meter) noexcept
     // HTTPD takes a signed length; reject unrepresentable driver input before
     // converting. The actual ESP32 PSRAM frame is far below this limit.
     constexpr auto maxLength = static_cast<std::size_t>(std::numeric_limits<ssize_t>::max());
-    if (frame->len > maxLength) {
+    if (frame.size > maxLength) {
         state_.captureFailed();
         return ESP_ERR_INVALID_SIZE;
     }
     std::array<char, 128U> header{};
     const auto length = std::snprintf(header.data(), header.size(),
-        "--esp32camframe\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n", frame->len);
+        "--esp32camframe\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n", frame.size);
     if ((length <= 0) || (static_cast<std::size_t>(length) >= header.size())) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -204,25 +206,25 @@ esp_err_t WebServer::sendFrame(httpd_req_t* request, RateMeter& meter) noexcept
     if (result == ESP_OK) {
         // D02: char access to the JPEG object representation for the SDK socket
         // API. No ownership transfer and no buffer modification take place.
-        result = httpd_resp_send_chunk(request, reinterpret_cast<const char*>(frame->buf),
-                                       static_cast<ssize_t>(frame->len));
+        result = httpd_resp_send_chunk(request, reinterpret_cast<const char*>(frame.data),
+                                       static_cast<ssize_t>(frame.size));
     }
     if (result == ESP_OK) {
         result = httpd_resp_send_chunk(request, "\r\n", 2);
     }
     if (result == ESP_OK) {
         const auto now = esp_timer_get_time();
-        const auto rates = meter.sent(now, frame->len);
-        state_.sent(static_cast<std::uint32_t>(frame->width),
-                    static_cast<std::uint32_t>(frame->height), frame->len, now, rates);
+        const auto rates = meter.sent(now, frame.size);
+        state_.sent(static_cast<std::uint32_t>(frame.width),
+                    static_cast<std::uint32_t>(frame.height), frame.size, now, rates);
     }
-    return result; // lease returns the buffer on success and every error path.
+    return result; // HTTP reads an independent copy; no driver lease is held.
 }
 
 esp_err_t WebServer::stream(httpd_req_t* request) noexcept
 {
-    StreamSession session{camera_, state_};
-    auto result = Network::setStreamingPower(true);
+    StreamSession session{frames_, state_};
+    auto result = session.result();
     if (result != ESP_OK) {
         return result;
     }
@@ -234,21 +236,7 @@ esp_err_t WebServer::stream(httpd_req_t* request) noexcept
             break;
         }
         const auto desired = state_.snapshot();
-        if (!camera_.matches(desired.selected)) {
-            state_.waking();
-            result = camera_.prepare(desired.selected);
-            if (result != ESP_OK) {
-                session.fail(result);
-                ESP_LOGE(tag, "Camera initialization failed (0x%x)", static_cast<unsigned>(result));
-                // No image body has been sent yet. Return a real HTTP error
-                // on initial wake rather than an unexplained closed socket.
-                if (!desired.hasApplied) {
-                    static_cast<void>(httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
-                        "Camera initialization failed; see /status camera_error_code"));
-                }
-                return result;
-            }
-            state_.ready(desired.selected, camera_.sensorPid());
+        if (!desired.hasApplied || (desired.applied != desired.selected)) {
             meter.reset(esp_timer_get_time());
         }
         // Honor Stop received during a potentially slow initialization retry.
@@ -256,10 +244,16 @@ esp_err_t WebServer::stream(httpd_req_t* request) noexcept
             break;
         }
         result = sendFrame(request, meter);
-        if ((result == ESP_ERR_INVALID_STATE) || (result == ESP_ERR_INVALID_SIZE)) {
+        const auto cameraError = state_.snapshot().cameraError;
+        if (cameraError != 0) {
+            result = cameraError;
             session.fail(result);
+            if (!desired.hasApplied) {
+                static_cast<void>(httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
+                    "Camera capture failed; see /status camera_error_code"));
+            }
         }
-        // sendFrame's lease is already gone: reconfiguration is now safe.
+        // Capture worker has already returned the driver frame.
         vTaskDelay(pdMS_TO_TICKS(10U));
     }
     if (result == ESP_OK) {
@@ -287,7 +281,7 @@ esp_err_t WebServer::start() noexcept
     if (result != ESP_OK) { return result; }
 
     // Value-initialize every SDK structure so future optional fields stay zero.
-    std::array<httpd_uri_t, 6U> routes{};
+    std::array<httpd_uri_t, 7U> routes{};
     routes[0U].uri = "/";
     routes[0U].handler = &bridge<&WebServer::index>;
     routes[1U].uri = "/health";
@@ -298,6 +292,8 @@ esp_err_t WebServer::start() noexcept
     routes[3U].handler = &bridge<&WebServer::control>;
     routes[4U].uri = "/stop";
     routes[4U].handler = &bridge<&WebServer::stop>;
+    routes[6U].uri = "/capture";
+    routes[6U].handler = &bridge<&WebServer::capture>;
     routes[5U].uri = "/stream";
     routes[5U].handler = &bridge<&WebServer::stream>;
     for (std::size_t i{0U}; i < routes.size(); ++i) {

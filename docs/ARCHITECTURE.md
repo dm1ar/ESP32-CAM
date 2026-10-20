@@ -13,6 +13,7 @@ classDiagram
         -Network network_
         -Camera camera_
         -SharedState state_
+        -FrameService frames_
         -WebServer web_
         +run() esp_err_t
     }
@@ -58,12 +59,35 @@ classDiagram
         -portMUX_TYPE lock_
         +~CriticalSection()
     }
-    class WebServer {
+    class FrameService {
+        -FrameStore store_
+        -Queue queue_
+        +start() esp_err_t
+        +capture(snapshot) esp_err_t
+        +begin() esp_err_t
+        +finish(failed) esp_err_t
+    }
+    class FrameStore {
         -Camera camera_
+        -JpegBuffer latest_
+        -JpegBuffer stream_
+        -JpegBuffer snapshot_
+        +capture(snapshot) esp_err_t
+        +sleep() esp_err_t
+    }
+    class JpegBuffer {
+        +capacity = 524288
+        +allocate() bool
+        +assign(frame) bool
+        +view() JpegView
+    }
+    class WebServer {
+        -FrameService frames_
         -SharedState state_
         -pageServer_
         -streamServer_
         +start() esp_err_t
+        -capture(request) esp_err_t
         -index(request) esp_err_t
         -health(request) esp_err_t
         -status(request) esp_err_t
@@ -73,7 +97,7 @@ classDiagram
         -sendFrame(request, meter) esp_err_t
     }
     class StreamSession {
-        -Camera camera_
+        -FrameService frames_
         -SharedState state_
         -bool failed_
         +fail() void
@@ -124,14 +148,18 @@ classDiagram
     Application *-- Camera
     Application *-- SharedState
     Application *-- WebServer
-    WebServer --> Camera : borrows
+    Application *-- FrameService
+    FrameService *-- FrameStore
+    FrameStore *-- JpegBuffer
+    FrameStore --> Camera : sole worker owner
+    WebServer --> FrameService : synchronous queued requests
     WebServer --> SharedState : borrows
-    WebServer ..> FrameLease : scoped per frame
+    FrameStore ..> FrameLease : returned before HTTP send
     WebServer ..> StreamSession : scoped per request
     WebServer ..> RateMeter : local per stream
-    StreamSession --> Camera : cleanup
-    StreamSession --> SharedState : finish
-    StreamSession ..> Network : restore modem sleep
+    StreamSession --> FrameService : queued begin and cleanup
+    StreamSession --> SharedState : report error
+    FrameService ..> Network : restore modem sleep
     SharedState *-- StreamSnapshot
     SharedState ..> CriticalSection : scoped locking
     StreamSnapshot *-- CameraSettings
@@ -153,13 +181,14 @@ explicit runtime cleanup boundary.
 
 | Execution context | Responsibility | Hardware access |
 | --- | --- | --- |
-| `app_main` at boot | Lamp off, initial PWDN, PSRAM check, Wi-Fi and HTTP startup | GPIO and initial camera sleep before HTTP starts |
+| `app_main` at boot | Lamp off, initial PWDN, PSRAM check, Wi-Fi, worker and HTTP startup | GPIO and initial camera sleep before worker starts |
 | ESP-IDF event loop | Wi-Fi connect/reconnect, DHCP URL logging, connection event bit | Wi-Fi API only |
-| HTTP server on port 80 | HTML, health, telemetry, settings validation, Stop request | Read-only system/Wi-Fi queries; no camera calls |
-| HTTP server on port 81 | One blocking MJPEG session, settings application, retries, frames, cleanup | Sole camera owner after boot |
+| HTTP server on port 80 | HTML, health, telemetry, settings validation, Stop and snapshot requests | Read-only system/Wi-Fi queries; no camera calls |
+| HTTP server on port 81 | One blocking MJPEG session, sends independent frame copies | No direct camera access |
+| Capture worker `camera_owner` | Serializes session boundaries, settings, capture, frame copies and standby | Sole camera owner after boot |
 | Browser | Start/Stop/Apply controls and status presentation | HTTP only |
 
-Every shared read/write goes through a bounded spinlock in `SharedState`.
+Every telemetry read/write goes through a bounded spinlock in `SharedState`.
 Snapshot copies leave the lock before driver queries and JSON formatting.
 No camera calls, blocking operations or network I/O occur under the lock.
 Settings are compared by value rather than wrapping generation counters.
@@ -171,50 +200,39 @@ reinitialization. RAM-only VGA/12 defaults return on reset.
 
 ```mermaid
 sequenceDiagram
-    actor User
-    participant UI as LiveCameraPage
-    participant Page as WebServer port 80
-    participant State as SharedState
-    participant Stream as WebServer port 81
-    participant Camera
-    participant Driver as ESP camera driver
-    User->>UI: Start stream
-    UI->>Stream: GET /stream
-    Stream->>State: begin(now)
-    Stream->>Stream: Create StreamSession and disable Wi-Fi sleep
-    Stream->>State: Snapshot selected settings
-    Stream->>State: waking()
-    Stream->>Camera: prepare(settings)
-    loop At most three initialization attempts
-        Camera->>Driver: PWDN high, delay 100 ms, initialize
-    end
-    Camera-->>Stream: Result and sensor PID
-    Stream->>State: ready(applied settings, PID)
-    loop Until Stop, disconnect, or failure
-        Stream->>Driver: FrameLease acquires JPEG
-        Stream-->>UI: Send multipart header, JPEG, terminator
-        Stream->>State: sent(actual bytes, time, measured rates)
-        Stream->>Driver: FrameLease returns buffer
-        opt Settings changed on page task
-            User->>UI: Apply settings
-            UI->>Page: POST /control
-            Page->>State: select(validated settings)
-            Stream->>State: Snapshot selected settings
-            Stream->>Camera: prepare(new settings), after frame returned
-            Stream->>State: ready(new settings, PID)
-            Stream->>Stream: Reset rate window
+    participant Page as HTTP port 80
+    participant Stream as HTTP port 81
+    participant Worker as FrameService worker
+    participant Store as FrameStore
+    participant Driver as Camera driver
+    Stream->>Worker: begin session
+    Worker->>Worker: state.begin(now), disable modem sleep
+    loop Until stop, deadline, disconnect or error
+        Stream->>Worker: capture stream frame
+        Worker->>Store: capture(false)
+        Store->>Driver: prepare settings if changed, borrow JPEG
+        Driver-->>Store: Driver-owned frame
+        Store->>Store: Copy into latest cache and stream buffer
+        Store->>Driver: Return FrameLease
+        Worker-->>Stream: Completed stream buffer
+        Stream-->>Stream: Send JPEG, update actual sent rates
+        opt Snapshot while stream is sending
+            Page->>Worker: capture snapshot
+            Worker->>Store: Copy latest cache into snapshot buffer
+            Worker-->>Page: Independent completed JPEG
+            Page-->>Page: Send image/jpeg
         end
-        UI->>Page: GET /status
-        Page->>State: snapshot()
-        Page-->>UI: JSON, expire rates if stale
     end
-    User->>UI: Stop stream
-    UI->>Page: POST /stop and close image connection
-    Page->>State: requestStop()
-    Stream->>Camera: StreamSession destructor calls sleep()
-    Camera->>Driver: Deinitialize capture and assert PWDN
-    Stream->>Stream: Restore Wi-Fi minimum modem sleep
-    Stream->>State: finish(), zero rates
+    Stream->>Worker: finish session
+    Worker->>Driver: Deinitialize and assert PWDN
+    Worker->>Worker: Clear cache, finish state, enable modem sleep
+    Page->>Worker: Snapshot while idle
+    Worker->>Driver: Initialize and capture selected settings
+    Driver-->>Worker: JPEG frame
+    Worker->>Worker: Copy JPEG, return driver lease
+    Worker->>Driver: Deinitialize and assert PWDN
+    Worker-->>Page: Completed snapshot buffer, standby restored
+    Page-->>Page: Send image/jpeg
 ```
 
 The sequence shows a successful session. A capture/initialization error
@@ -222,21 +240,44 @@ uses the same scoped cleanup. A socket/header failure is treated as a
 disconnect and returns to standby; hardware/capture failures report `error`
 with PWDN asserted. A later GET `/stream` can retry from either state.
 Stop is asynchronous: an in-progress driver capture or socket send must
-return before the stream task can clean up. Current send/receive timeouts
+return before the worker can perform queued cleanup. Current send/receive timeouts
 are five seconds; the pinned camera driver's frame wait can take four seconds.
+
+## Shared JPEG ownership
+
+The worker serializes a static queue of up to two request pointers. Each HTTP
+handler waits for its request completion semaphore before using its output;
+the stack request and static semaphore storage remain alive until completion.
+Session begin/finish also go through the worker so a snapshot cannot interleave
+halfway through stream power/state transitions. No network transmission happens
+in the worker. The driver retains its own two frame buffers.
+
+Three RAII JPEG buffers allocate 512 KiB each in PSRAM at startup (D09).
+Only the worker writes them. The stream HTTP task reads only the stream copy;
+the page HTTP task reads only the snapshot copy. Each task serializes its own
+requests, so its output cannot change while being sent. Active snapshots reuse
+the latest captured image if settings match, which may be several seconds old
+if a stream client is slow. Settings changes force a fresh capture. Standby
+clears the cache, and idle snapshots always capture a new frame. Allocation,
+invalid capture and oversized JPEG failures are explicit errors.
+
+Idle snapshots temporarily wake and then clean up the camera without starting
+a stream session, extending a deadline or incrementing sent-frame statistics.
+They may block the page server during sensor initialization/capture. Snapshots
+are serialized on port 80, and one MJPEG viewer remains supported on port 81.
 
 ## Camera state machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> Standby: Boot asserts PWDN
-    Standby --> Waking: Browser GET /stream
+    Standby --> Waking: GET /stream or idle GET /capture
     Error --> Waking: Browser retries GET /stream
     Waking --> Streaming: Initialization succeeds
     Waking --> Error: Three failures or GPIO error, cleanup
     Waking --> Standby: Stop observed after successful initialization
     Streaming --> Waking: Settings changed, previous buffer returned
-    Streaming --> Standby: Stop, enabled deadline or socket failure, cleanup
+    Streaming --> Standby: Stop, enabled deadline, socket failure or idle snapshot complete
     Streaming --> Error: Capture or cleanup failure
     Standby --> Standby: Select RAM settings or poll status
     Error --> Error: Poll status or select settings
@@ -268,8 +309,8 @@ enabled flag and limit in seconds.
 configured duration when enabled, or no deadline when disabled. It clears
 the previous timeout reason. `shouldStop(now)` checks
 that deadline under the existing spinlock and requests Stop without touching
-hardware. The stream task checks before initialization, after initialization
-and after acquiring a frame. Status polling can request the same Stop, but
+hardware. The stream HTTP task checks before requesting capture and after receiving
+the copied frame. Status polling can request the same Stop, but
 the stream task does not depend on polls to enforce it. The existing session
 guard performs power-down and Wi-Fi sleep cleanup at the next safe boundary.
 Settings/rate-window changes never modify the session deadline.

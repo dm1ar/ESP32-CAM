@@ -58,7 +58,7 @@ when disabled; use `auto_off` to distinguish unlimited streaming from expiry.
 
 ## Browser stream
 
-Verified on this network: **http://192.168.1.123/**. This is the current DHCP
+Verified on this network: **http://192.168.1.128/**. This is the current DHCP
 address and can change after reboot or router changes.
 
 Once the board boots and connects, the serial log prints
@@ -85,6 +85,43 @@ measure frames successfully written to the stream socket over roughly
 one-second windows; they do not measure browser rendering speed. Both reset
 to zero when the stream stops or no frames have been sent for three seconds.
 The last frame's size and total sent frame count remain visible while idle.
+
+## JPEG snapshots and shared frames
+
+`GET http://<assigned-ip>/capture` returns one JPEG with `Content-Type: image/jpeg`
+and `Cache-Control: no-store`, using the selected resolution and quality.
+During streaming it copies the latest captured frame, without opening another
+stream or changing the stream deadline. When idle it wakes the sensor, captures
+one frame and powers down before sending the response. A failed capture returns
+HTTP 500 and retains its error code in `/status`. Snapshot requests do not
+increment stream FPS, throughput or frame counters.
+
+A dedicated FreeRTOS capture worker owns the camera. It returns every driver
+frame before network transmission. Three startup-allocated PSRAM buffers
+(cache, stream response, snapshot response) isolate slow HTTP consumers.
+Each JPEG is bounded to 512 KiB; larger frames return an error instead of
+allocating more memory. One MJPEG viewer remains supported. Port 80 processes
+one snapshot at a time; an idle snapshot may briefly delay other page requests
+while the camera wakes. RTSP is not implemented yet.
+
+For openHAB's generic IP Camera Thing, use `/capture` as `snapshotUrl` and
+`:81/stream` as `mjpegUrl`. Let openHAB relay the stream to multiple viewers.
+Its additional FFmpeg consumers should use that relay rather than opening a
+second camera stream. These endpoints have not yet been tested in openHAB.
+Consider the configured auto-off duration when choosing continuous monitoring.
+
+To validate the board after flashing and reading its DHCP URL from UART:
+
+```bash
+python3 tools/check_camera.py http://<assigned-ip>/
+```
+
+This requires Pillow on the host, decodes original JPEGs at all five resolutions,
+checks idle and simultaneous streaming snapshots, then restores the original
+settings and stops the stream. On the replacement board, all five resolutions passed: 30 original snapshots
+and 47 stream frames decoded, including simultaneous snapshot/stream access.
+Standby cleanup and countdown preservation passed; actual openHAB integration
+and full-duration auto-off expiry remain untested.
 
 ## Resolution, quality, and standby
 

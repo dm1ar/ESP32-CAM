@@ -11,6 +11,7 @@ mkdir -p "$test_dir"
     -I "$project_dir/tests/fakes" -I "$project_dir/main" \
     "$project_dir/tests/firmware_tests.cpp" "$project_dir/main/model.cpp" \
     "$project_dir/main/shared_state.cpp" "$project_dir/main/camera.cpp" \
+    "$project_dir/main/frame_store.cpp" \
     -o "$test_dir/firmware_tests"
 "$test_dir/firmware_tests"
 node "$project_dir/tests/browser_tests.mjs"

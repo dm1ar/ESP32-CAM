@@ -11,7 +11,7 @@ if(NOT wifi_result EQUAL 0)
 endif()
 
 idf_component_register(SRCS "main.cpp" "application.cpp" "network.cpp"
-    "camera.cpp" "shared_state.cpp" "model.cpp" "web_server.cpp"
+    "camera.cpp" "frame_store.cpp" "frame_service.cpp" "shared_state.cpp" "model.cpp" "web_server.cpp"
     INCLUDE_DIRS "." "${wifi_header_dir}"
     PRIV_REQUIRES esp_psram esp_driver_gpio esp_wifi esp_event esp_netif nvs_flash esp_http_server esp_timer
     EMBED_TXTFILES "index.html")
