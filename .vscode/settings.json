@@ -1,0 +1,23 @@
+{
+    "idf.currentSetup": "/home/rax/esp/v6.1/esp-idf",
+    "idf.extensionActivationMode": "always",
+    "idf.port": "/dev/ttyUSB0",
+    "idf.monitorPort": "/dev/ttyUSB0",
+    "idf.flashType": "UART",
+    "idf.flashBaudRate": "115200",
+    "idf.monitorBaudRate": "115200",
+    "idf.buildPath": "${workspaceFolder}/build",
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32",
+        "IDF_PYTHON_ENV_PATH": "/home/rax/.espressif/python_env/idf6.1_py3.12_env"
+    },
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "cmake.configureOnOpen": false,
+    "clangd.path": "/home/rax/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
+    "clangd.arguments": [
+      "--background-index",
+      "--query-driver=/home/rax/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin/xtensa-esp*-elf-*",
+      "--compile-commands-dir=${workspaceFolder}/build"
+    ]
+}

@@ -1,0 +1,6 @@
+CompileFlags:
+    # The standalone ESP clangd package has no bundled resource headers.
+    # Query the selected GCC for its own builtins as well as C++ include paths.
+    BuiltinHeaders: QueryDriver
+    CompilationDatabase: build
+    Remove: [-fstrict-volatile-bitfields, -fno-tree-switch-conversion, -fno-shrink-wrap, -mdisable-hardware-atomics]

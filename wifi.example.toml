@@ -1,0 +1,7 @@
+[wifi]
+# Give each camera a unique name before building/flashing its firmware.
+node_name = "ESP32-CAM01"
+auto_off = true
+auto_off_minutes = 20
+ssid = "W5QD34A"
+password = "your-wifi-password"

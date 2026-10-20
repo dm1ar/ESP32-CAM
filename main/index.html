@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ESP32-CAM01 Live</title>
+  <style>
+    body{margin:0;background:#101820;color:#edf4f7;font:16px system-ui;text-align:center}
+    main{max-width:850px;margin:24px auto;padding:20px}
+    img{display:block;width:100%;aspect-ratio:4/3;object-fit:contain;background:#000;border-radius:12px}
+    button,select,input{font:inherit}button,select{padding:10px 16px;border:0;border-radius:8px}
+    button{margin:8px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}
+    .controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px;margin:20px 0}
+    label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
+    input{max-width:100%;width:150px}p{color:#acbdc9}
+    .telemetry{padding:12px;background:#1b2a35;border-radius:8px;line-height:1.7;font-variant-numeric:tabular-nums}
+    #details{font-size:14px;overflow-wrap:anywhere}.hint{font-size:14px}
+  </style>
+</head>
+<body><main>
+  <h1 id="nodeName">ESP32-CAM01 Live</h1>
+  <p id="autoOffHint">The camera sleeps until you start streaming.</p>
+  <img id="camera" alt="Camera preview — press Start stream">
+  <div class="controls">
+    <label>Resolution <select id="resolution">
+      <option value="QVGA">320 × 240</option><option value="VGA" selected>640 × 480</option>
+      <option value="SVGA">800 × 600</option><option value="XGA">1024 × 768</option>
+      <option value="UXGA">1600 × 1200</option>
+    </select></label>
+    <label>JPEG quality <input id="quality" type="range" min="0" max="63" value="12"><output id="qualityValue">12</output></label>
+    <button id="apply">Apply settings</button>
+  </div>
+  <p class="hint">Lower quality number = better image and more bandwidth. Settings reset to VGA / 12 after reboot.</p>
+  <button id="start">Start stream</button><button id="stop">Stop stream</button>
+  <p id="status" role="status">Ready — camera in standby</p>
+  <p id="telemetry" class="telemetry" aria-live="polite">Loading camera status...</p>
+  <p id="details"></p>
+</main><script>
+'use strict';
+
+/** One controller owns browser commands and the single status polling timer.
+ * Camera ownership and measured FPS remain on the device; this class only
+ * displays telemetry and requests changes through the documented HTTP API.
+ */
+class LiveCameraPage {
+  constructor() {
+    this.camera = document.getElementById('camera');
+    this.status = document.getElementById('status');
+    this.quality = document.getElementById('quality');
+    this.resolution = document.getElementById('resolution');
+    this.wantStream = false;
+    this.awaitingStream = false;
+    this.editing = false;
+    this.commandBusy = false;
+    this.timer = undefined;
+    this.refreshVersion = 0;
+
+    this.quality.oninput = () => {
+      document.getElementById('qualityValue').value = this.quality.value;
+      this.editing = true;
+    };
+    this.resolution.onchange = () => { this.editing = true; };
+    document.getElementById('start').onclick = () => this.start();
+    document.getElementById('stop').onclick = () => this.stop();
+    document.getElementById('apply').onclick = () => this.apply();
+    this.camera.onerror = () => {
+      if (this.wantStream) {
+        this.wantStream = false;
+        this.awaitingStream = false;
+        this.status.textContent = 'Stream ended. Press Start stream to wake the camera again.';
+        void this.refresh(); // Fetch the device's error/timeout reason now.
+      }
+    };
+  }
+
+  buttons(busy) {
+    this.commandBusy = busy;
+    for (const id of ['start', 'stop', 'apply']) {
+      document.getElementById(id).disabled = busy;
+    }
+  }
+
+  static memory(bytes) {
+    return (bytes / 1048576).toFixed(2) + ' MiB';
+  }
+
+  static remaining(seconds) {
+    const minutes = Math.floor(seconds / 60);
+    return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  }
+
+  async post(path, body) {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    return response.json();
+  }
+
+  start() {
+    if (this.commandBusy || this.wantStream) {
+      return;
+    }
+    this.wantStream = true;
+    // Until the device acknowledges this stream, status can still describe
+    // the previous timed-out session. Do not close a newly opened image on it.
+    this.awaitingStream = true;
+    // A unique query prevents reusing a previous MJPEG connection from cache.
+    const streamUrl = new URL(location.href);
+    streamUrl.port = '81';
+    streamUrl.pathname = '/stream';
+    streamUrl.search = '?t=' + Date.now();
+    streamUrl.hash = '';
+    this.camera.src = streamUrl.href;
+    this.status.textContent = 'Waking camera...';
+    void this.refresh();
+  }
+
+  async stop() {
+    if (this.commandBusy) {
+      return;
+    }
+    this.buttons(true);
+    this.wantStream = false;
+    this.awaitingStream = false;
+    this.camera.removeAttribute('src');
+    try {
+      await this.post('/stop', '');
+      this.status.textContent = 'Stopped — entering standby';
+    } catch {
+      this.status.textContent = 'Stop request failed; camera will sleep when the stream disconnects.';
+    } finally {
+      this.buttons(false);
+      void this.refresh();
+    }
+  }
+
+  async apply() {
+    if (this.commandBusy) {
+      return;
+    }
+    this.buttons(true);
+    try {
+      await this.post('/control', new URLSearchParams({
+        resolution: this.resolution.value,
+        quality: this.quality.value
+      }));
+      this.editing = false;
+      this.status.textContent = this.wantStream
+        ? 'Applying settings between frames...'
+        : 'Settings saved — camera stays in standby';
+    } catch (error) {
+      this.status.textContent = 'Could not apply settings: ' + error.message;
+    } finally {
+      this.buttons(false);
+      void this.refresh();
+    }
+  }
+
+  render(sample) {
+    document.getElementById('nodeName').textContent = `${sample.node_name} Live`;
+    document.title = `${sample.node_name} Live`;
+    this.camera.alt = `${sample.node_name} camera preview`;
+    const remaining = LiveCameraPage.remaining(sample.stream_remaining_seconds);
+    document.getElementById('autoOffHint').textContent = sample.auto_off
+      ? `The camera sleeps until you start streaming. Streams stop automatically after ${sample.auto_off_minutes} minutes.`
+      : 'The camera sleeps until you start streaming. Automatic stream stop is disabled.';
+    const timerStatus = sample.auto_off
+      ? (sample.streaming ? `${remaining} remaining` : `Auto-off after ${sample.auto_off_minutes} minutes`)
+      : 'Auto-off disabled';
+    // Polling must not overwrite a user's unsaved edits or an active command.
+    if (!this.editing && !this.commandBusy) {
+      this.resolution.value = sample.resolution;
+      this.quality.value = sample.jpeg_quality;
+      document.getElementById('qualityValue').value = this.quality.value;
+    }
+    document.getElementById('telemetry').textContent =
+      `${sample.node_name} | ${sample.sensor} | ${sample.width} × ${sample.height} ${sample.format} | ` +
+      `${sample.fps.toFixed(1)} sent fps | ${(sample.frame_bytes / 1024).toFixed(1)} KiB/frame | ` +
+      `${sample.kib_per_second.toFixed(1)} KiB/s | Camera ${sample.camera_state}` +
+      ` | ${timerStatus}`;
+    const signal = sample.wifi_rssi_dbm === null ? 'disconnected' : sample.wifi_rssi_dbm + ' dBm';
+    const power = sample.wifi_modem_sleep ? 'Wi-Fi modem sleep enabled' : 'Wi-Fi full performance';
+    document.getElementById('details').textContent =
+      `Sensor PID ${sample.sensor_pid} · JPEG quality ${sample.jpeg_quality} · Wi-Fi ${signal} · ${power}` +
+      ` · PSRAM ${LiveCameraPage.memory(sample.psram_bytes)} ` +
+      `(${LiveCameraPage.memory(sample.psram_free_bytes)} free mapped memory)` +
+      ` · Free heap ${Math.round(sample.free_heap_bytes / 1024)} KiB · Uptime ${sample.uptime_seconds} s` +
+      ` · Frames sent ${sample.frames_sent} · Capture errors ${sample.capture_errors} · ESP-IDF ${sample.idf_version}`;
+    if (sample.streaming && !sample.stream_timed_out) {
+      this.awaitingStream = false;
+    }
+    if (sample.camera_state === 'error' && !this.awaitingStream) {
+      this.wantStream = false;
+      this.camera.removeAttribute('src');
+      const code = Number(sample.camera_error_code || 0);
+      this.status.textContent = `Camera failed (code ${code}). Press Start stream to retry.`;
+    } else if (sample.auto_off && sample.stream_timed_out && !this.awaitingStream) {
+      this.wantStream = false;
+      this.camera.removeAttribute('src');
+      this.status.textContent = `Stopped automatically after ${sample.auto_off_minutes} minutes. Press Start stream to begin again.`;
+    } else if (this.wantStream && sample.camera_state === 'streaming' && !sample.settings_pending) {
+      this.status.textContent = `Streaming — ${timerStatus}`;
+    }
+  }
+
+  async refresh() {
+    clearTimeout(this.timer);
+    // Commands may trigger a new poll before an older fetch completes. A
+    // generation counter prevents stale responses from rendering or scheduling
+    // extra timers; only the newest request controls the polling cadence.
+    const version = ++this.refreshVersion;
+    let active = false;
+    try {
+      const response = await fetch('/status', {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!response.ok) {
+        throw new Error('Status request failed');
+      }
+      const sample = await response.json();
+      if (version !== this.refreshVersion) {
+        return;
+      }
+      active = sample.streaming;
+      this.render(sample);
+    } catch {
+      if (version === this.refreshVersion) {
+        document.getElementById('telemetry').textContent = 'Live status unavailable — reconnecting...';
+      }
+    } finally {
+      if (version === this.refreshVersion) {
+        const delay = (active || this.wantStream) ? 1000 : 5000;
+        this.timer = setTimeout(() => { void this.refresh(); }, delay);
+      }
+    }
+  }
+}
+
+const page = new LiveCameraPage();
+void page.refresh();
+</script></body></html>

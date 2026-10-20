@@ -1,0 +1,42 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "ESP32-CAM: Host tests",
+            "type": "process",
+            "command": "bash",
+            "args": ["${workspaceFolder}/tools/test.sh"],
+            "group": "test",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "ESP32-CAM: Build",
+            "type": "process",
+            "command": "bash",
+            "args": ["${workspaceFolder}/tools/idf.sh", "build"],
+            "group": {"kind": "build", "isDefault": true},
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "ESP32-CAM: Flash (manual boot mode)",
+            "type": "process",
+            "command": "bash",
+            "args": ["${workspaceFolder}/tools/idf.sh", "-p", "${config:idf.port}", "-b", "115200", "flash"],
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "ESP32-CAM: Monitor",
+            "type": "process",
+            "command": "bash",
+            "args": ["${workspaceFolder}/tools/idf.sh", "-p", "${config:idf.monitorPort}", "monitor"],
+            "problemMatcher": []
+        },
+        {
+            "label": "ESP32-CAM: Menuconfig",
+            "type": "process",
+            "command": "bash",
+            "args": ["${workspaceFolder}/tools/idf.sh", "menuconfig"],
+            "problemMatcher": []
+        }
+    ]
+}
