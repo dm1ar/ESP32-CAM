@@ -4,3 +4,10 @@
 /sdkconfig.old
 __pycache__/
 /wifi.toml
+
+/cam.log
+# Private per-device settings, wherever the generator is invoked.
+config.bin
+
+# Local agent instructions.
+/AGENTS.md

@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #ifndef ESP32_CAM_BOARD_HPP
 #define ESP32_CAM_BOARD_HPP
 

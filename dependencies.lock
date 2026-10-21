@@ -23,13 +23,43 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.3.1
+  espressif/esp_libsrtp:
+    component_hash: 131560184c73ec09f77d8904a2db709307803f0f9f111898921b6966776eac15
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
+  espressif/esp_peer:
+    component_hash: 92bc1b80772acf8a0e2dc36193ec24278e0793140eca2a4060d8ce7b45c47845
+    dependencies:
+    - name: espressif/esp_libsrtp
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.5.7
+  espressif/mdns:
+    component_hash: b5b30022c46302eab89c1d2e3b6fb5918a627563a7462f0ee284b22b9a934967
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.14.0
   idf:
     source:
       type: idf
     version: 6.1.0
 direct_dependencies:
 - espressif/esp32-camera
+- espressif/esp_peer
+- espressif/mdns
 - idf
-manifest_hash: 33a3edc125eec8c9bc656ccb7545bc3f026febab66da2063d0afa3fb25455c14
+manifest_hash: 81b37ff9077dc7eff93dbe4fb07b43dc20c2d470621f114024dd6bf4985c7b73
 target: esp32
 version: 3.0.0

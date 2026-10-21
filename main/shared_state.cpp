@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #include "shared_state.hpp"
 
 namespace cam {
@@ -23,6 +30,25 @@ bool SharedState::select(const CameraSettings& settings) noexcept
     return true;
 }
 
+bool SharedState::setPolicy(StreamPolicy policy, std::int64_t now) noexcept
+{
+    if ((policy.limitSeconds < 300U) || (policy.limitSeconds > 7200U)
+        || ((policy.limitSeconds % 60U) != 0U)) { return false; }
+    const CriticalSection guard{lock_};
+    if (!data_.stopRequested && streamExpired(data_, now)) {
+        data_.streamTimedOut = true;
+        data_.stopRequested = true;
+    }
+    data_.policy = policy;
+    data_.streamDeadlineUs = policy.autoOff && data_.streaming
+        ? data_.streamStartedUs + policy.limitUs() : 0;
+    if (!data_.stopRequested && streamExpired(data_, now)) {
+        data_.streamTimedOut = true;
+        data_.stopRequested = true;
+    }
+    return true; // Stop stays sticky; a policy edit cannot resurrect a session.
+}
+
 void SharedState::requestStop() noexcept
 {
     const CriticalSection guard{lock_};
@@ -46,6 +72,7 @@ void SharedState::begin(std::int64_t now) noexcept
     data_.stopRequested = false;
     data_.streamTimedOut = false;
     data_.cameraError = 0;
+    data_.streamStartedUs = now;
     data_.streamDeadlineUs = data_.policy.autoOff ? now + data_.policy.limitUs() : 0;
     data_.lastFrameUs = now;
     data_.rates = {};

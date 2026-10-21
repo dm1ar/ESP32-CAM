@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #ifndef ESP32_CAM_MODEL_HPP
 #define ESP32_CAM_MODEL_HPP
 
@@ -139,6 +146,45 @@ struct StreamPolicy final {
     }
 };
 
+// Browser policy updates are RAM-only and bounded to the displayed slider.
+[[nodiscard]] inline bool parseAutoOff(std::string_view body, StreamPolicy& result) noexcept
+{
+    StreamPolicy parsed{};
+    bool enabled{false};
+    bool duration{false};
+    while (!body.empty()) {
+        const auto separator = body.find('&');
+        const auto field = body.substr(0U, separator);
+        const auto equals = field.find('=');
+        if (equals == std::string_view::npos) { return false; }
+        const auto key = field.substr(0U, equals);
+        const auto value = field.substr(equals + 1U);
+        if ((key == "auto_off") && !enabled) {
+            if ((value != "true") && (value != "false")) { return false; }
+            parsed.autoOff = value == "true";
+            enabled = true;
+        } else if ((key == "auto_off_minutes") && !duration) {
+            if (value.empty() || (value.size() > 3U)) { return false; }
+            std::uint32_t minutes{0U};
+            for (const char digit : value) {
+                if ((digit < '0') || (digit > '9')) { return false; }
+                minutes = (minutes * 10U) + static_cast<std::uint32_t>(digit - '0');
+            }
+            if ((minutes < 5U) || (minutes > 120U)) { return false; }
+            parsed.limitSeconds = minutes * 60U;
+            duration = true;
+        } else { return false; }
+        if (separator == std::string_view::npos) { body = {}; }
+        else {
+            body.remove_prefix(separator + 1U);
+            if (body.empty()) { return false; }
+        }
+    }
+    if (!enabled || !duration) { return false; }
+    result = parsed;
+    return true;
+}
+
 // Owned by the stream task. Only complete, successfully transmitted frames
 // enter the one-second window; browser rendering never contributes to FPS.
 class RateMeter final {
@@ -166,6 +212,7 @@ struct StreamSnapshot final {
     std::uint32_t sensorPid{0U};
     Rates rates{};
     std::int64_t lastFrameUs{0};
+    std::int64_t streamStartedUs{0};
     std::int64_t streamDeadlineUs{0};
     CameraState cameraState{CameraState::standby};
     bool streaming{false};
