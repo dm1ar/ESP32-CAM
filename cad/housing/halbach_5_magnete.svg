@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="210" viewBox="0 0 1000 210">
+  <title>Fünf Magnettaschen – Draufsicht</title>
+  <desc>Fünf gleiche Taschen mit Orientierungssymbolen: Nord aus der Ebene, rechts, Süd in die Ebene, links, Nord aus der Ebene.</desc>
+  <rect width="1000" height="210" fill="white"/>
+  <g fill="none" stroke="black" stroke-width="6" stroke-linejoin="miter">
+    <rect x="20" y="15" width="960" height="180"/>
+    <path d="M212 15V195 M404 15V195 M596 15V195 M788 15V195"/>
+    <circle cx="116" cy="105" r="43"/>
+    <circle cx="884" cy="105" r="43"/>
+  </g>
+  <g fill="black">
+    <circle cx="116" cy="105" r="13"/>
+    <circle cx="884" cy="105" r="13"/>
+    <path d="M257 95H329V73L365 105 329 137V115H257Z"/>
+    <path d="M743 95H671V73L635 105 671 137V115H743Z"/>
+  </g>
+  <path d="M474 67L526 143M526 67L474 143" stroke="black" stroke-width="16" stroke-linecap="square"/>
+</svg>
