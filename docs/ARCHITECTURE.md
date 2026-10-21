@@ -1,449 +1,436 @@
 # Firmware architecture
 
-All first-party firmware is C++ in namespace `cam`. `app_main` has C linkage
-for the ESP-IDF entry point and holds one static `Application`. Its members
-outlive the event callbacks and HTTP tasks, even after `app_main` returns.
-The embedded JavaScript `LiveCameraPage` class owns browser presentation.
+This document describes the current MJPEG, RTSP and WebRTC implementation.
+For setup, wiring and viewer URLs, see the [README](../README.md).
 
-## Class diagram
+The firmware is C++ in namespace `cam`, built with GNU++26 on ESP-IDF 6.1.
+`app_main` owns one static `Application`; its members outlive all callbacks
+and worker tasks. ESP-IDF supplies FreeRTOS, Wi-Fi, networking and HTTP
+services. After boot, only the camera worker accesses camera hardware.
+
+## Components and ownership
 
 ```mermaid
 classDiagram
     class Application {
-        -Network network_
-        -Camera camera_
-        -SharedState state_
-        -RtspServer rtsp_
-        -FrameService frames_
-        -WebServer web_
         +run() esp_err_t
     }
     class Network {
-        -station_
-        -connected_
-        -eventStorage_
         +start() esp_err_t
-        +logUrl() void
         +nodeName() const_char_ptr
-        +setStreamingPower(bool) esp_err_t
-        -onEvent(context, base, id, data) void
-    }
-    class Camera {
-        -CameraSettings applied_
-        -bool initialized_
-        +prepare(CameraSettings) esp_err_t
-        +sleep() esp_err_t
-        +matches(CameraSettings) bool
-        +sensorPid() uint32_t
-    }
-    class FrameLease {
-        -camera_fb_t frame_
-        +get() camera_fb_t
-        +~FrameLease()
+        +streamPolicy() StreamPolicy
+        +setStreamingPower(active) esp_err_t
     }
     class SharedState {
-        -StreamSnapshot data_
-        -portMUX_TYPE lock_
         +snapshot() StreamSnapshot
-        +select(CameraSettings) bool
+        +select(settings) bool
+        +setPolicy(policy, now) bool
+        +begin(now) void
         +requestStop() void
         +shouldStop(now) bool
-        +begin(now) void
-        +waking() void
-        +ready(settings, pid) void
         +sent(width, height, bytes, now, rates) void
-        +captureFailed() void
-        +cameraFailed(error) void
         +finish(failed) void
     }
-    class CriticalSection {
-        -portMUX_TYPE lock_
-        +~CriticalSection()
-    }
-    class RtspServer {
-        -FrameService frames_
-        -SharedState state_
-        -listener_
-        +start() esp_err_t
-    }
-    class RtspSession {
-        -client_
-        -RTP socket
-        -RTCP socket
-        -transport
-        +run() void
-    }
-    class Packetizer {
-        -Jpeg jpeg_
-        -offset_
-        -sequence_
-        +next(packet) size_t
-    }
     class FrameService {
-        -FrameStore store_
-        -Queue queue_
         +start() esp_err_t
-        +capture(snapshot) esp_err_t
         +begin() esp_err_t
+        +capture(snapshot) esp_err_t
         +finish(failed) esp_err_t
+        +streamView() JpegView
+        +snapshotView() JpegView
     }
     class FrameStore {
-        -Camera camera_
-        -JpegBuffer latest_
-        -JpegBuffer stream_
-        -JpegBuffer snapshot_
+        +start() esp_err_t
         +capture(snapshot) esp_err_t
         +sleep() esp_err_t
+    }
+    class Camera {
+        +prepare(settings) esp_err_t
+        +matches(settings) bool
+        +sleep() esp_err_t
+    }
+    class FrameLease {
+        +get() camera_fb_t_ptr
     }
     class JpegBuffer {
         +capacity = 524288
-        +allocate() bool
         +assign(frame) bool
         +view() JpegView
     }
     class WebServer {
-        -FrameService frames_
-        -SharedState state_
-        -pageServer_
-        -streamServer_
         +start() esp_err_t
-        -capture(request) esp_err_t
-        -index(request) esp_err_t
-        -health(request) esp_err_t
-        -status(request) esp_err_t
-        -control(request) esp_err_t
-        -stop(request) esp_err_t
-        -stream(request) esp_err_t
-        -sendFrame(request, meter) esp_err_t
     }
-    class StreamSession {
-        -FrameService frames_
-        -SharedState state_
-        -bool failed_
-        +fail() void
-        +~StreamSession()
+    class RtspServer {
+        +start() esp_err_t
+    }
+    class RtspSession {
+        +run() void
+    }
+    class WebRtcServer {
+        +start() esp_err_t
+        +offer(sdp) esp_err_t
+        +stop() esp_err_t
+        +answer() span
+        +phase() const_char_ptr
     }
     class RateMeter {
-        -startUs_
-        -frames_
-        -bytes_
-        -Rates rates_
         +reset(now) void
         +sent(now, bytes) Rates
     }
-    class CameraSettings {
-        +Resolution resolution
-        +uint32_t quality
-        +valid() bool
-    }
-    class StreamSnapshot {
-        +StreamPolicy policy
-        +CameraSettings selected
-        +CameraSettings applied
-        +CameraState cameraState
-        +Rates rates
-        +bool streaming
-        +bool stopRequested
-        +int64_t streamDeadlineUs
-        +bool streamTimedOut
-        +int32_t cameraError
-    }
-    class StreamPolicy {
-        +bool autoOff
-        +uint32_t limitSeconds
-        +limitUs() int64_t
-    }
-    class Rates {
-        +float fps
-        +float kibPerSecond
-    }
-    class LiveCameraPage {
-        +start() void
-        +stop() Promise
-        +apply() Promise
-        +refresh() Promise
-        +render(sample) void
-    }
     Application *-- Network
-    Application *-- Camera
     Application *-- SharedState
+    Application *-- FrameService
+    Application *-- Camera
     Application *-- WebServer
     Application *-- RtspServer
-    RtspServer ..> RtspSession : one client at a time
-    RtspSession --> FrameService : queued owner requests
-    RtspSession --> SharedState : actual sends and Stop
-    RtspSession ..> Packetizer : per frame
-    Application *-- FrameService
+    Application *-- WebRtcServer
     FrameService *-- FrameStore
-    FrameStore *-- JpegBuffer
-    FrameStore --> Camera : sole worker owner
-    WebServer --> FrameService : synchronous queued requests
-    WebServer --> SharedState : borrows
-    FrameStore ..> FrameLease : returned before HTTP send
-    WebServer ..> StreamSession : scoped per request
-    WebServer ..> RateMeter : local per stream
-    StreamSession --> FrameService : queued begin and cleanup
-    StreamSession --> SharedState : report error
-    FrameService ..> Network : restore modem sleep
-    SharedState *-- StreamSnapshot
-    SharedState ..> CriticalSection : scoped locking
-    StreamSnapshot *-- CameraSettings
-    StreamSnapshot *-- StreamPolicy
-    StreamSnapshot *-- Rates
-    Camera *-- CameraSettings
-    RateMeter *-- Rates
-    LiveCameraPage ..> WebServer : HTTP ports 80 and 81
+    FrameStore *-- JpegBuffer : latest, stream, snapshot
+    FrameStore --> Camera : worker owns access
+    FrameStore ..> FrameLease : scoped driver buffer
+    WebServer --> FrameService : queued requests
+    WebServer --> WebRtcServer : queued signaling and close
+    RtspServer ..> RtspSession : one control client
+    RtspSession --> FrameService : queued requests
+    WebRtcServer --> FrameService : queued requests
+    WebServer --> SharedState
+    RtspSession --> SharedState
+    WebRtcServer --> SharedState
+    FrameService --> SharedState
+    FrameService ..> Network : modem sleep policy
+    WebServer ..> RateMeter
+    RtspSession ..> RateMeter
+    WebRtcServer ..> RateMeter
 ```
 
-`Camera`, `Network`, `Application`, `WebServer`, `SharedState`, `FrameLease`,
-`StreamSession` and `CriticalSection` cannot be copied. `FrameLease` also
-cannot be moved: one driver buffer always has one scoped return. It borrows
-the buffer, while the driver retains allocation ownership. `Camera` has no
-destructor-driven hardware action at global shutdown; `StreamSession` is the
-explicit runtime cleanup boundary.
+`Application` constructs `Network`, `Camera`, `SharedState`, `FrameService`,
+`WebRtcServer`, `WebServer` and `RtspServer` in dependency order. Boot latches
+the flash lamp off, asserts camera power-down, checks PSRAM, connects Wi-Fi,
+and starts the camera worker, WebRTC worker, HTTP servers and RTSP listener.
+A startup failure is fatal to application startup.
 
-## Task and ownership boundaries
+## FreeRTOS execution contexts
 
-| Execution context | Responsibility | Hardware access |
+The application has five long-lived service tasks: the camera worker, WebRTC
+worker, RTSP worker, and two HTTP server tasks. This is not the total RTOS
+task count: ESP-IDF, Wi-Fi, TCP/IP and camera drivers also create tasks. mDNS
+adds a temporary task during browser address resolution. The tested ESP32
+has two Xtensa cores; these services are not all pinned to one core.
+
+| Context | Stack configured by this application | Responsibility |
 | --- | --- | --- |
-| `app_main` at boot | Lamp off, initial PWDN, PSRAM check, Wi-Fi, worker and HTTP startup | GPIO and initial camera sleep before worker starts |
-| ESP-IDF event loop | Wi-Fi connect/reconnect, DHCP URL logging, connection event bit | Wi-Fi API only |
-| HTTP server on port 80 | HTML, health, telemetry, settings validation, Stop and snapshot requests | Read-only system/Wi-Fi queries; no camera calls |
-| HTTP server on port 81 | One blocking MJPEG session, sends independent frame copies | No direct camera access |
-| RTSP task on TCP 554 | One RTSP control client, SDP, UDP/TCP RTP/JPEG and RTCP | No direct camera access |
-| Capture worker `camera_owner` | Serializes session boundaries, settings, capture, frame copies and standby | Sole camera owner after boot |
-| Browser | Start/Stop/Apply controls and status presentation | HTTP only |
+| `app_main` | SDK configuration | Initial hardware state and service startup |
+| `camera_owner` | 4096 bytes | Sole runtime camera owner; capture, settings, copies and standby |
+| `webrtc` | 12,288 bytes | All peer APIs, signaling completion, data-channel sends and cleanup |
+| `rtsp` | 12,288 bytes | One control client; RTP/JPEG, RTCP and session lifecycle |
+| HTTP port 80 | 6144 bytes | Pages, status, controls, snapshots and WebRTC signaling |
+| HTTP port 81 | 6144 bytes | One blocking MJPEG session |
+| ESP-IDF event loop | SDK configuration | Wi-Fi reconnect, DHCP logging and connection state |
+| Temporary mDNS service | Component configuration | Resolve browser ICE host names before opening a peer |
 
-Every telemetry read/write goes through a bounded spinlock in `SharedState`.
-Snapshot copies leave the lock before driver queries and JSON formatting.
-No camera calls, blocking operations or network I/O occur under the lock.
-Settings are compared by value rather than wrapping generation counters.
-A setting accepted during initialization remains pending until the next
-frame boundary; returning to the already applied setting avoids a needless
-reinitialization. RAM-only VGA/12 defaults return on reset.
+The three explicitly created workers use priority 5. HTTP task scheduling
+uses the SDK server configuration. `camera_owner` performs no network sends.
+The port-80 server serializes its handlers: sensor wake for an idle snapshot
+or a synchronous WebRTC offer can delay other requests on that server.
 
-## Stream and setting sequence
+## Exclusive video session and shared JPEGs
+
+`FrameService` uses a static queue holding up to two request pointers. Callers
+submit `begin`, stream capture, snapshot capture or `finish` operations and
+wait for a completion semaphore. The request and semaphore storage stay alive
+on the caller's stack until the worker signals completion; there is no timeout
+after enqueue that could invalidate borrowed storage.
+
+The worker serializes the video claim. `begin()` rejects a second active
+session before changing state. There is one shared stream output buffer, so
+only one MJPEG, RTSP or WebRTC owner may use it. A rejected caller must not
+finish another session. Busy responses are HTTP 503 for MJPEG, HTTP 409 for
+WebRTC offers, and RTSP 453 for PLAY. RTSP services one control client at a time.
+
+Three `JpegBuffer` objects each allocate 512 KiB in PSRAM at startup:
+
+| Buffer | Written by | Read by |
+| --- | --- | --- |
+| Latest cache | Camera worker | Camera worker when copying outputs |
+| Stream copy | Camera worker | The single active MJPEG, RTSP or WebRTC owner |
+| Snapshot copy | Camera worker | The serialized port-80 snapshot handler |
+
+The camera driver retains two separate frame buffers. `FrameLease` borrows
+one driver frame for a bounded copy, then returns it before any network
+transmission. Stream owners request another capture only after finishing
+with their current stream copy. Network backpressure therefore does not hold
+a camera driver lease. Oversized or invalid JPEGs fail explicitly; buffers
+do not grow per frame. These ownership rules also hold during settings changes.
 
 ```mermaid
 sequenceDiagram
-    participant Page as HTTP port 80
-    participant Stream as HTTP port 81
-    participant Worker as FrameService worker
+    participant Video as MJPEG, RTSP or WebRTC owner
+    participant Worker as camera_owner
     participant Store as FrameStore
     participant Driver as Camera driver
-    Stream->>Worker: begin session
-    Worker->>Worker: state.begin(now), disable modem sleep
-    loop Until stop, deadline, disconnect or error
-        Stream->>Worker: capture stream frame
-        Worker->>Store: capture(false)
-        Store->>Driver: prepare settings if changed, borrow JPEG
+    participant HTTP as Snapshot handler, port 80
+    Video->>Worker: begin()
+    Worker->>Worker: Claim session, start deadline, disable modem sleep
+    loop Until Stop, deadline, disconnect or error
+        Video->>Worker: capture(false)
+        Worker->>Store: Apply selected settings if needed
+        Store->>Driver: Borrow JPEG
         Driver-->>Store: Driver-owned frame
-        Store->>Store: Copy into latest cache and stream buffer
-        Store->>Driver: Return FrameLease
-        Worker-->>Stream: Completed stream buffer
-        Stream-->>Stream: Send JPEG, update actual sent rates
-        opt Snapshot while stream is sending
-            Page->>Worker: capture snapshot
-            Worker->>Store: Copy latest cache into snapshot buffer
-            Worker-->>Page: Independent completed JPEG
-            Page-->>Page: Send image/jpeg
+        Store->>Store: Copy latest cache and stream output
+        Store->>Driver: Return driver frame
+        Worker-->>Video: Completed stream view
+        Video-->>Video: Send frame or chunks
+        opt Snapshot while stream copy is in use
+            HTTP->>Worker: capture(true)
+            Worker->>Store: Reuse matching latest frame or capture fresh
+            Store->>Store: Copy independent snapshot output
+            Worker-->>HTTP: Completed snapshot view
+            HTTP-->>HTTP: Send image/jpeg
         end
     end
-    Stream->>Worker: finish session
-    Worker->>Driver: Deinitialize and assert PWDN
+    Video->>Worker: finish(failed)
+    Worker->>Driver: Deinitialize, disable clock, assert PWDN
     Worker->>Worker: Clear cache, finish state, enable modem sleep
-    Page->>Worker: Snapshot while idle
-    Worker->>Driver: Initialize and capture selected settings
-    Driver-->>Worker: JPEG frame
-    Worker->>Worker: Copy JPEG, return driver lease
-    Worker->>Driver: Deinitialize and assert PWDN
-    Worker-->>Page: Completed snapshot buffer, standby restored
-    Page-->>Page: Send image/jpeg
 ```
 
-The sequence shows a successful session. A capture/initialization error
-uses the same scoped cleanup. A socket/header failure is treated as a
-disconnect and returns to standby; hardware/capture failures report `error`
-with PWDN asserted. A later GET `/stream` can retry from either state.
-Stop is asynchronous: an in-progress driver capture or socket send must
-return before the worker can perform queued cleanup. Current send/receive timeouts
-are five seconds; the pinned camera driver's frame wait can take four seconds.
+During streaming, a snapshot reuses the latest captured image when settings
+match. It can be older than the request if the viewer is slow. A settings
+change forces a fresh capture. An idle snapshot wakes and captures once,
+then restores standby before its response is sent. It does not start a video
+session, extend a deadline or contribute to video frame/rate counters.
 
-## Shared JPEG ownership
+## MJPEG and HTTP responses
 
-The worker serializes a static queue of up to two request pointers. Each HTTP
-handler waits for its request completion semaphore before using its output;
-the stack request and static semaphore storage remain alive until completion.
-Session begin/finish also go through the worker so a snapshot cannot interleave
-halfway through stream power/state transitions. No network transmission happens
-in the worker. The driver retains its own two frame buffers.
+Port 80 serves the UI, snapshot and control endpoints; port 81 serves
+`GET /stream`. The full endpoint table is in the [README](../README.md#http-interface-and-telemetry).
+Both pages are embedded with ESP-IDF `EMBED_TXTFILES`.
 
-Three RAII JPEG buffers allocate 512 KiB each in PSRAM at startup (D09).
-Only the worker writes them. The stream HTTP task reads only the stream copy;
-the page HTTP task reads only the snapshot copy. Each task serializes its own
-requests, so its output cannot change while being sent. Active snapshots reuse
-the latest captured image if settings match, which may be several seconds old
-if a stream client is slow. Settings changes force a fresh capture. Standby
-clears the cache, and idle snapshots always capture a new frame. Allocation,
-invalid capture and oversized JPEG failures are explicit errors.
+The MJPEG response is close-delimited `multipart/x-mixed-replace` with boundary
+`esp32camframe`. Each part carries `Content-Type: image/jpeg` and its own
+`Content-Length`. The overall response sends `Connection: close`, no overall
+content length and no HTTP transfer coding. The public `httpd_send()` adapter
+handles partial writes and rejects zero, negative or oversized send results.
+This framing supports VLC's HTTP/1.0 fallback and HTTP/1.1/browser clients.
 
-Idle snapshots temporarily wake and then clean up the camera without starting
-a stream session, extending a deadline or incrementing sent-frame statistics.
-They may block the page server during sensor initialization/capture. Snapshots
-are serialized on port 80, and one MJPEG viewer remains supported on port 81.
+Raw headers are delayed until the first successful capture, allowing an
+initial camera failure to return an ordinary HTTP 500. After a successful
+stream ends, the handler writes the closing multipart boundary and schedules
+socket closure. A failed send returns an error so the SDK closes the socket.
+A scoped `StreamSession` sends final cleanup through `FrameService` on exit.
+Other HTTP endpoints use normal SDK response framing.
 
-## Camera state machine
+## RTSP and RTP/JPEG
+
+`RtspServer` listens on TCP 554. A `RtspSession` owns its control socket and,
+for UDP, RTP/RTCP sockets through scoped guards. A fixed 4096-byte input buffer
+frames RTSP requests and interleaved RTCP; request bodies are limited to 1024
+bytes. Parsers check headers, sequences, paths and transport ranges before
+narrowing values. Multicast and arbitrary destination parameters are rejected;
+UDP media goes to the control connection's peer.
+
+The endpoint is `rtsp://CAMERA_IP:554/stream`. OPTIONS, DESCRIBE, SETUP, PLAY,
+PAUSE, TEARDOWN and GET_PARAMETER are supported. SETUP negotiates UDP unicast
+(camera ports 5004/5005) or interleaved TCP channels. PAUSE releases video
+ownership; a later PLAY starts a new session and auto-off interval. Control
+and RTCP inactivity expires after 60 seconds.
+
+`rtsp_protocol` validates baseline JPEG dimensions, sampling, quantizers and
+standard Huffman tables. `Packetizer` sends the entropy scan as RFC 2435 JPEG
+payloads (RTP type 26), with explicit quantizers, 90 kHz timestamps and packets
+up to 1400 bytes. All fragments of a frame share a timestamp; the final one
+sets the marker bit. Capture is paced at no more than 10 frames/s.
+
+UDP transient send errors are retried for at most fifty 10 ms delays per
+datagram, with Stop/deadline checks. Sends yield after eight packets. TCP uses
+`TCP_NODELAY`. RTCP sender reports and source descriptions are sent every five
+seconds, and BYE on final termination. RTCP uses system wall time; the firmware
+does not add NTP synchronization. Capture pacing and deadlines use the
+monotonic ESP timer.
+
+## Direct WebRTC
+
+`WebRtcServer` owns all `esp_peer` API calls on the `webrtc` worker. HTTP
+submits an SDP offer through a static two-entry command queue and waits for
+completion, using the same borrowed-request lifetime rule as `FrameService`.
+Fixed 4096-byte buffers retain the remote offer and local answer. Callbacks
+publish bounded SDP or atomic channel/ACK/failure state. SDP publication uses
+a separate short critical section.
+
+The browser creates an ordered, reliable `jpeg` data channel and gathers its
+complete offer before `POST /webrtc/offer`. The camera first claims the video
+slot. Before passing SDP to `esp_peer`, it resolves UDP `.local` candidate
+names using Espressif `mdns`: at most four lookups, two seconds each. Only the
+address tokens change; ICE credentials, fingerprints, ports and other SDP
+fields are preserved. Failed mDNS candidates are omitted; no usable result
+returns a descriptive HTTP 400 and releases the claim.
+
+The query-only mDNS service is created on demand and freed before peer/DTLS
+allocation to preserve internal RAM. It does not advertise a camera hostname
+or HTTP service. DNS resolution requires LAN multicast reachability. The
+firmware uses ICE Lite and host candidates without STUN/TURN. The peer has
+32 KiB send and receive caches; ICE, DTLS and SCTP run directly on the ESP32.
+HTTP signaling is not authenticated or TLS-protected.
+
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant HTTP as HTTP port 80
+    participant Peer as WebRTC worker
+    participant DNS as Temporary mDNS service
+    participant Camera as FrameService
+    Browser->>Browser: Create jpeg channel and gather ICE
+    Browser->>HTTP: POST complete SDP offer
+    HTTP->>Peer: Queued offer
+    Peer->>Camera: begin() exclusive video claim
+    opt Offer contains .local ICE candidates
+        Peer->>DNS: Resolve bounded host names
+        DNS-->>Peer: IPv4 addresses
+        Peer->>DNS: Free service before DTLS allocation
+    end
+    Peer-->>HTTP: SDP answer
+    HTTP-->>Browser: application/sdp
+    Browser->>Peer: ICE, DTLS, SCTP, data-channel open
+    Browser->>Peer: next
+    loop One JPEG, split into bounded chunks
+        Peer->>Camera: Capture when starting a new frame
+        Camera-->>Peer: Independent stream copy
+        Peer-->>Browser: JPG1 header and JPEG bytes
+        Browser->>Browser: Reassemble, decode and draw completed frame
+        Browser->>Peer: next
+    end
+    Note over Browser,Peer: At most one chunk outstanding, maximum five captures/s
+    Peer->>Camera: finish() on Stop, timeout or disconnect
+```
+
+Each binary data-channel message carries a 16-byte big-endian header followed
+by at most 4096 JPEG bytes:
+
+| Offset | Width | Field |
+| --- | --- | --- |
+| 0 | 4 bytes | Magic `JPG1` (`0x4a504731`) |
+| 4 | 4 bytes | Frame ID |
+| 8 | 4 bytes | Total JPEG byte count, at most 512 KiB |
+| 12 | 4 bytes | Payload offset in that JPEG |
+
+The viewer sends ASCII `next` after each chunk; for the last chunk it waits
+until image decoding and canvas drawing complete. The final ACK counts the
+frame as sent. Temporary peer `WOULD_BLOCK` results retry the same chunk
+without advancing its offset or extending the ACK deadline. Capture is capped
+at 5 frames/s. Initial connection expires after 30 seconds without progress;
+a connected viewer expires after ten seconds without a real ACK. Peer close,
+HTTP Stop and auto-off all use worker-owned camera cleanup.
+
+This custom JPEG data channel needs the supplied page. It is not an encoded
+H.264/VP8 video track, and it has no audio. `POST /webrtc/close` closes only
+the WebRTC service; a rejected offer must not close another protocol's owner.
+
+## Shared state, settings and deadlines
+
+`SharedState` stores selected/applied settings, session state, timing and
+measured rates under a bounded FreeRTOS critical section. Callers copy a
+snapshot, then release the lock before formatting JSON, accessing hardware,
+resolving DNS or doing network I/O. No blocking operations occur under these
+locks. Settings are compared by value and applied by the camera worker at a
+safe frame boundary. Reset restores VGA / JPEG quality 12.
+
+`tools/wifi_config.py` validates the local TOML and generates constants for
+Wi-Fi credentials, node name and initial `StreamPolicy`. Only the network
+translation unit includes the private generated header. The node name is a
+1–32 character ASCII hostname label, used by DHCP, UART, main UI and status.
+It does not guarantee router DNS or `<node_name>.local` availability.
+
+`SharedState::begin()` records monotonic start time and an optional deadline.
+Auto-off defaults to enabled at 20 minutes; both TOML and runtime policy
+require a whole duration from 5 to 120 minutes. `setPolicy()` evaluates an
+already expired deadline before changing policy and recomputes the deadline
+from the original session start. Disabling removes it; shortening past elapsed
+time requests timeout. Existing Stop remains sticky. Settings changes and
+snapshots never extend the deadline.
+
+All video owners check `shouldStop()` independently of status polling and
+request cleanup after outstanding capture/send work returns. The main page
+also observes the deadline through `/status`. The timeout reason persists
+until the next stream. Auto-off limits a session; a reconnecting client can
+start another session.
+
+## Camera state and cleanup
 
 ```mermaid
 stateDiagram-v2
     [*] --> Standby: Boot asserts PWDN
-    Standby --> Waking: GET /stream or idle GET /capture
-    Error --> Waking: Browser retries GET /stream
-    Waking --> Streaming: Initialization succeeds
-    Waking --> Error: Three failures or GPIO error, cleanup
-    Waking --> Standby: Stop observed after successful initialization
-    Streaming --> Waking: Settings changed, previous buffer returned
-    Streaming --> Standby: Stop, enabled deadline, socket failure or idle snapshot complete
-    Streaming --> Error: Capture or cleanup failure
-    Standby --> Standby: Select RAM settings or poll status
-    Error --> Error: Poll status or select settings
+    Standby --> Waking: Video capture or idle snapshot
+    Error --> Waking: Retry capture
+    Waking --> Ready: Initialization succeeds
+    Waking --> Error: Initialization or GPIO failure
+    Ready --> Waking: Apply changed settings
+    Ready --> Standby: Stop, deadline, disconnect or idle snapshot complete
+    Ready --> Error: Capture or cleanup failure
+    Standby --> Standby: Save settings or poll status
 ```
 
-Both standby and error mean the application has attempted to deinitialize
-the driver and assert sensor PWDN; failures are logged. Wi-Fi stays associated
-with minimum modem sleep requested. The page/health server stays available.
-`streaming` in JSON denotes an active stream session, including its wake phase;
-`camera_state` distinguishes waking from actually configured streaming.
+`Ready` here means the driver is configured; its JSON camera-state value is
+`streaming`. The separate JSON `streaming` boolean denotes a video session,
+including negotiation/wake time. An idle snapshot can temporarily configure
+the sensor without owning a video session.
 
-## Node identity and session deadline
+Initialization retries up to three times with a 100 ms PWDN interval. The
+board configuration uses the maintained SCCB/I2C backend, a 10 MHz XCLK, JPEG
+output and two PSRAM driver buffers. Cleanup attempts deinitialization,
+clock shutdown and PWDN assertion; a failure is logged and retained in status.
+The worker clears the latest cache and restores Wi-Fi minimum modem sleep.
+This is not ESP32 deep sleep; HTTP remains available. Stop is asynchronous,
+so driver and socket timeouts can delay completion.
 
-`wifi.toml` provides `[wifi].node_name`, defaulting to `ESP32-CAM01`.
-The private configuration generator validates a single 1–32 character ASCII
-hostname label (letters/digits, internal hyphens) before generating a constant.
-`Network::nodeName()` exposes only that identifier; the credential header
-stays private to the network translation unit. The name identifies the DHCP
-host, UART URL message, browser and status JSON. No mDNS service is added.
+## Measured telemetry
 
-`[wifi].auto_off` defaults to true and `auto_off_minutes` defaults to 20.
-The configuration generator validates boolean/integer types and duration
-bounds before generating C++ constants. `Network::streamPolicy()` supplies
-those compiled values to `Application` and `SharedState` at startup; they
-supply the boot defaults and can be changed in RAM through browser controls. `StreamPolicy` contains the
-enabled flag and limit in seconds.
+`RateMeter` accumulates complete frames and original JPEG bytes over windows
+of at least one second. MJPEG/RTSP count successful complete sends; WebRTC
+counts final frame ACKs. Multipart, RTP, RTCP and data-channel header overhead
+is excluded. UDP delivery is not guaranteed by a successful send. Snapshots
+do not increment video counters.
 
-`SharedState::begin()` stores a device-monotonic deadline of start + the
-configured duration when enabled, or no deadline when disabled. It clears
-the previous timeout reason. `shouldStop(now)` checks
-that deadline under the existing spinlock and requests Stop without touching
-hardware. The stream HTTP task checks before requesting capture and after receiving
-the copied frame. Status polling can request the same Stop, but
-the stream task does not depend on polls to enforce it. The existing session
-guard performs power-down and Wi-Fi sleep cleanup at the next safe boundary.
-Settings/rate-window changes never modify the session deadline.
+Rates reset when a session stops and expire after three seconds without a
+completed frame. The main browser page polls every second while active and
+every five seconds while idle. Its response-generation checks prevent stale
+fetches from overwriting newer state, and preserve unsaved control edits.
+The WebRTC page separately displays received frame count and JPEG size.
 
-Status includes `node_name`, `auto_off`, `auto_off_minutes`, `stream_limit_seconds`,
-`stream_remaining_seconds` (rounded upwards while active, zero idle/disabled) and
-`stream_timed_out` (retained in standby until a new stream). The browser
-shows remaining time as `MM:SS` or Auto-off disabled, clears its stream intent on timeout and
-allows an explicit restart. While waiting for a new stream to be acknowledged,
-it ignores stale timeout status belonging to the previous session.
+## Memory, build boundaries and verification
 
-## Rates and browser polling
+The single-app partition is 1500 KiB at `0x10000` on 4 MB flash. NVS and PHY
+regions are retained; there is no OTA slot or image filesystem. The validated
+WebRTC/mDNS build is 1,383,392 bytes, leaving 152,608 bytes in the app partition.
+PSRAM allocations include three 512 KiB JPEG copies and two driver buffers.
+The tested 8 MB PSRAM chip maps 4 MB; internal RAM remains a separate budget.
 
-`RateMeter` accumulates only successfully sent complete frames and JPEG bytes
-over at least one second. It publishes actual frames/elapsed seconds and
-JPEG bytes/(1024 × elapsed seconds). Multipart overhead is excluded, matching
-the original metric. Failed sends do not increment either metric or total
-frames. Reset and expiry are covered by host tests.
+Application stack/buffer sizes are fixed. The camera driver, Wi-Fi, HTTP,
+peer and mDNS components allocate resources internally. In WebRTC hardware
+checks, internal free heap was approximately 48 KiB while streaming and
+135 KiB after cleanup. These are observations, not guaranteed headroom for
+other configurations. `/status` exposes both internal free heap and its
+largest block.
 
-The browser polls every second while a session is active or requested, and
-every five seconds idle. Its generation counter prevents older fetch replies
-from overwriting the display or creating extra polling timers. Unsaved edits
-are preserved. The device's measured FPS is displayed without substituting
-browser frame/render rates.
+The lwIP socket budget is 20. The two HTTP servers each use three
+infrastructure sockets and allow up to three client sockets; RTSP uses its
+listener/control and optional RTP/RTCP sockets. WebRTC also needs ICE transport
+resources, but video ownership is exclusive. mDNS runs only during offer
+preprocessing and is freed before the peer opens. Socket allocation errors
+remain explicit failures.
 
-## Build and dependencies
+Own firmware sources use strict warnings as errors, no exceptions and no RTTI.
+Managed components keep their upstream compiler settings. Dependency versions
+are locked: camera 2.1.7, JPEG 1.3.1, peer 1.5.7, libsrtp 1.0.0 and mDNS 1.14.0
+on ESP-IDF 6.1.0. Generated credential headers and firmware binaries stay
+private and outside version control.
 
-All seven first-party translation units use GNU++26; managed dependencies
-keep upstream settings. Exceptions and RTTI are disabled. The generated
-private Wi-Fi header remains in ignored `build/private_config/`; binaries
-contain credentials and must not be shared.
+Host tests isolate SDK fakes from firmware include paths. Sanitized production
+model, camera, frame-store, parser and lifecycle tests complement browser
+controller tests and independent FFmpeg socket tests. Real aiortc checks cover
+ICE/DTLS/SCTP, mDNS names and JPEG decoding; Chrome live playback and VLC
+RTSP/MJPEG were confirmed. HTTP/RTSP resolution sweeps, snapshots, ownership
+rejection and cleanup passed on hardware. Full-duration hardware auto-off
+and actual openHAB integration remain untested.
 
-The standard `SINGLE_APP_LARGE` partition layout provides a 1500 KiB factory
-application beginning at `0x10000`, within the verified 4 MB flash. It keeps
-the existing NVS and PHY regions; it does not provide OTA. Full flashing
-updates the partition table along with the app. `dependencies.lock` retains
-camera 2.1.7, JPEG 1.3.1 and IDF 6.1.0.
-
-
-## RTSP transport and video ownership
-
-RtspServer starts a process-lifetime FreeRTOS task and TCP listener on port 554.
-One RtspSession at a time owns its control socket and optional UDP RTP/RTCP
-sockets through scoped Socket guards. Requests and interleaved RTCP are framed
-in a fixed 4096-byte input buffer; request bodies are limited to 1024 bytes.
-Protocol parsing and RTP/JPEG packet construction live in the host-testable
-rtsp_protocol module. Recognized headers reject duplicates, CSeq is parsed as
-an unsigned integer, URI paths are fixed and transport ranges are checked
-before narrowing. Unsupported multicast/destination parameters are rejected.
-
-FrameService::begin serializes the exclusive video claim with snapshot and
-cleanup requests. If another video session is active, begin returns invalid
-state and the rejected caller must not perform finish. HTTP responds 503;
-RTSP PLAY responds 453. Snapshots remain independent. Capture, packetization
-and socket transmission finish before that caller requests its next stream
-copy; no other task writes that output while it is sent.
-
-RTSP sends RFC 2435 JPEG payloads (type 26), using camera quantization tables,
-standard Huffman table fingerprints, validated baseline sampling/dimensions,
-and entropy scan data without the JPEG file header. Packets are at most
-1400 bytes, offsets refer to scan bytes and the final packet sets the RTP
-marker. One 90 kHz timestamp is shared by all fragments of a frame. UDP sends
-are yielded after each eight packets. A completed frame contributes its original
-JPEG byte count to the same measured RateMeter used by MJPEG; it does not count
-wire overhead or guarantee UDP delivery. Capture pacing caps RTSP at 10 FPS.
-
-SDP advertises one JPEG video track; SETUP negotiates UDP unicast or interleaved
-TCP. The destination is the control peer. UDP local ports are 5004/5005. RTCP
-sender reports and source descriptions are sent every five seconds; BYE is sent
-on final termination. RTCP uses system wall time (no NTP synchronization is
-added here), while media/session timing uses the monotonic ESP timer. RTSP
-control/RTCP keepalive has a 60-second inactivity limit. PAUSE releases video
-ownership, and resumed PLAY begins a new auto-off interval. HTTP Stop and the
-compiled auto-off deadline also end RTSP and use worker standby cleanup.
-
-No audio, authentication, multicast, H.264 transcoding or concurrent video
-sessions are added. Host socket tests use the real server and queue worker on
-port 8554 with POSIX adapters and synthetic JPEGs; firmware uses 554. An actual
-camera, network and independent decoder are required for hardware acceptance.
-
-The SDK socket budget is explicitly 20. Each HTTP server consumes a listener,
-control socket and message socket (six infrastructure sockets total), plus
-up to three client sockets per server. RTSP adds listener/control and UDP
-RTP/RTCP sockets. Twenty covers the configured maximum of sixteen with
-headroom; the SDK default of ten is insufficient for concurrent page access
-and UDP RTSP. UDP allocation/configuration errors are logged with errno.
-
-Hardware checks under weak Wi-Fi also showed premature UDP termination with
-no capture error. A bounded retry path now handles ENOMEM/ENOBUFS/EAGAIN/
-EWOULDBLOCK/EINTR (up to fifty 10 ms delays per datagram), with Stop/deadline
-checks and fatal errno logging. TCP uses TCP_NODELAY for small interleaved
-headers. Host UDP adapters inject ENOMEM to exercise recovery. The hardware
-acceptance tool bounds FFmpeg startup probing to 1 second/32 KiB; this does
-not change media or telemetry FPS. SDP advertises the 10 FPS capture ceiling.
-
-## Live auto-off policy
-
-The checkbox and 5–120 minute slider POST a complete two-field form to
-/auto-off on port 80. Browser polling preserves unsaved/in-flight edits,
-invalidates pre-command responses, and displays a save error without losing
-the draft. TOML boot defaults remain true/20 minutes with the same duration
-range; accepted browser changes are RAM-only.
-
-SharedState::setPolicy validates under a short critical section, evaluates
-the old deadline before changing policy, and computes the new deadline from
-streamStartedUs. It never clears an existing Stop request. Disabling clears
-the deadline; enabling a duration shorter than elapsed time requests timeout.
-The stream owner observes the same state for MJPEG/RTSP. Camera settings and
-snapshots never change the timer. Tests cover range/type rejection, start
-anchoring, enable/disable, shortening, sticky Stop, browser drafts and errors.
+See [validation](VALIDATION.md) for evidence and commands, and
+[coding guidelines](CODING_GUIDELINES.md) for the MISRA-oriented rules and
+SDK/language deviations. No formal MISRA compliance is claimed.
