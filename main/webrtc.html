@@ -1,0 +1,102 @@
+<!doctype html>
+<!--
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+-->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32-CAM WebRTC</title>
+<style>body{background:#101820;color:#edf4f7;font:16px system-ui;text-align:center;margin:24px}main{max-width:850px;margin:auto}canvas{width:100%;background:black;aspect-ratio:4/3;object-fit:contain}button{padding:12px 20px;margin:12px;font:inherit}a{color:#8dcfff}p{overflow-wrap:anywhere}</style></head>
+<body><main><h1>ESP32-CAM WebRTC</h1><p>Direct JPEG over an encrypted WebRTC data channel. One video viewer at a time.</p>
+<canvas id="preview" width="640" height="480"></canvas><div><button id="start">Start WebRTC</button><button id="stop">Stop</button></div>
+<p id="status" role="status">Ready</p><p id="metrics"></p><p><a href="/">Camera settings and auto-off</a></p></main>
+<script>
+'use strict';
+class JpegAssembler {
+  constructor() { this.reset(); }
+  reset() { this.id = undefined; this.offset = 0; this.bytes = undefined; }
+  push(data) {
+    if (!(data instanceof ArrayBuffer) || data.byteLength < 17 || data.byteLength > 4112) throw new Error('Invalid JPEG chunk');
+    const view = new DataView(data);
+    if (view.getUint32(0) !== 0x4a504731) throw new Error('Invalid JPEG protocol');
+    const id = view.getUint32(4), total = view.getUint32(8), offset = view.getUint32(12);
+    if (!total || total > 524288) throw new Error('Invalid JPEG size');
+    if (offset === 0) { this.id = id; this.offset = 0; this.bytes = new Uint8Array(total); }
+    const size = data.byteLength - 16;
+    if (id !== this.id || !this.bytes || total !== this.bytes.length || offset !== this.offset || offset + size > total) throw new Error('Incomplete JPEG');
+    this.bytes.set(new Uint8Array(data, 16), offset); this.offset += size;
+    if (this.offset === total) { const bytes = this.bytes; this.reset(); return bytes; }
+    return null;
+  }
+}
+class WebRtcViewer {
+  constructor() {
+    this.pc = null; this.channel = null; this.owns = false; this.busy = false; this.frames = 0;
+    this.status = document.getElementById('status'); this.canvas = document.getElementById('preview');
+    document.getElementById('start').onclick = () => { void this.start(); };
+    document.getElementById('stop').onclick = () => { void this.stop(); };
+    addEventListener('pagehide', () => { if (this.owns) navigator.sendBeacon('/webrtc/close', ''); });
+  }
+  async iceComplete(pc) {
+    if (pc.iceGatheringState === 'complete') return;
+    await new Promise((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', check); };
+      const check = () => { if (pc.iceGatheringState === 'complete') { cleanup(); resolve(); } };
+      const timer = setTimeout(() => { cleanup(); reject(new Error('ICE gathering timed out')); }, 10000);
+      pc.addEventListener('icegatheringstatechange', check); check();
+    });
+  }
+  async start() {
+    if (this.busy || this.pc) return;
+    this.busy = true; document.getElementById('start').disabled = true;
+    try {
+      if (typeof RTCPeerConnection === 'undefined') throw new Error('WebRTC is not supported in this browser');
+      this.status.textContent = 'Connecting directly to the camera...';
+      const pc = new RTCPeerConnection({iceServers: []}); this.pc = pc;
+      const channel = pc.createDataChannel('jpeg', {ordered: true}); this.channel = channel;
+      channel.binaryType = 'arraybuffer'; const assembler = new JpegAssembler(); this.frames = 0;
+      channel.onopen = () => { if (pc === this.pc) { this.status.textContent = 'WebRTC connected'; channel.send('next'); } };
+      channel.onmessage = async event => {
+        if (pc !== this.pc) return;
+        try {
+          const jpeg = assembler.push(event.data);
+          if (jpeg) {
+            const image = await createImageBitmap(new Blob([jpeg], {type: 'image/jpeg'}));
+            if (pc !== this.pc) { image.close(); return; }
+            this.canvas.width = image.width; this.canvas.height = image.height;
+            this.canvas.getContext('2d').drawImage(image, 0, 0); image.close();
+            this.frames++; document.getElementById('metrics').textContent = `${this.frames} JPEG frames received · ${jpeg.length} bytes last frame`;
+          }
+          if (channel.readyState === 'open') channel.send('next');
+        } catch (error) { this.status.textContent = error.message; void this.stop(false); }
+      };
+      channel.onclose = () => { if (pc === this.pc) { this.status.textContent = 'Stream ended (Stop, auto-off or disconnect).'; void this.stop(false); } };
+      pc.onconnectionstatechange = () => {
+        if (pc === this.pc && ['failed', 'disconnected'].includes(pc.connectionState)) {
+          this.status.textContent = 'WebRTC disconnected. Press Start WebRTC to retry.'; void this.stop(false);
+        }
+      };
+      await pc.setLocalDescription(await pc.createOffer()); await this.iceComplete(pc);
+      if (pc !== this.pc) return;
+      const response = await fetch('/webrtc/offer', {method: 'POST', headers: {'Content-Type': 'application/sdp'},
+        body: pc.localDescription.sdp, signal: AbortSignal.timeout(20000)});
+      const answer = await response.text();
+      if (!response.ok) throw new Error(answer);
+      this.owns = true;
+      if (pc !== this.pc) { await fetch('/webrtc/close', {method: 'POST'}); this.owns = false; return; }
+      await pc.setRemoteDescription({type: 'answer', sdp: answer});
+    } catch (error) { this.status.textContent = `WebRTC failed: ${error.message}`; await this.stop(false); }
+    finally { this.busy = false; document.getElementById('start').disabled = false; }
+  }
+  async stop(message = true) {
+    const pc = this.pc; this.pc = null; this.channel = null;
+    if (pc) pc.close();
+    if (this.owns) { this.owns = false; try { await fetch('/webrtc/close', {method: 'POST', signal: AbortSignal.timeout(5000)}); } catch {} }
+    if (message) this.status.textContent = 'Stopped';
+  }
+}
+const viewer = new WebRtcViewer();
+</script></body></html>

@@ -9,10 +9,213 @@ The firmware uses native ESP-IDF 6.1, GNU++26 and FreeRTOS. The sensor stays
 in standby until a viewer or snapshot request needs it. The flash lamp stays
 off, and images are not saved to an SD card.
 
+[Licensing](LICENSING.md) ·
 [Architecture and diagrams](docs/ARCHITECTURE.md) ·
 [Coding guidelines](docs/CODING_GUIDELINES.md) ·
 [Validation record](docs/VALIDATION.md) ·
 [GitHub profile](https://github.com/dm1ar)
+
+## Install using the browser — ESP Web Tools
+
+This is the installation path for users who want to flash prebuilt firmware.
+ESP-IDF and VS Code are not required. Use desktop Chrome or Edge, a USB-to-UART
+adapter with 3.3 V logic, and a stable 5 V supply for the camera. Follow the
+[hardware wiring](#hardware) before connecting power.
+
+The installer has not been published yet. Obtain the prepared `web-flash`
+folder containing `index.html`, `installer.mjs`, `manifest.json` and
+`firmware.bin`; maintainers can generate it using the
+[VS Code/ESP-IDF instructions below](#develop-and-flash-with-vs-code-and-esp-idf).
+Do not open `index.html` directly as a file: serve the folder on localhost or
+use an HTTPS-hosted copy when one is available.
+
+### 1. Create your private settings image
+
+Install Python **3.11 or newer**. Copy [wifi.example.toml](wifi.example.toml)
+to a local `wifi.toml` and enter your settings:
+
+```toml
+[wifi]
+node_name = "ESP32-CAM01"
+auto_off = true
+auto_off_minutes = 20
+ssid = "your-wifi-ssid"
+password = "your-wifi-password"
+```
+
+Use a 2.4 GHz network and a unique node name for each camera. Names accept
+1–32 ASCII letters/digits and internal hyphens. If omitted, node name,
+auto-off and duration default to `ESP32-CAM01`, `true` and `20`. Duration must
+be a whole number from 5 to 120 minutes.
+
+From the project directory, run on Ubuntu:
+
+```bash
+python3 -m venv build/flash-env
+build/flash-env/bin/python -m pip install -r tools/requirements-flash.txt
+build/flash-env/bin/python tools/wifi_config.py wifi.toml config.bin
+```
+
+On Windows, use PowerShell:
+
+```powershell
+py -3 -m venv build/flash-env
+.\build\flash-env\Scripts\python.exe -m pip install -r tools/requirements-flash.txt
+.\build\flash-env\Scripts\python.exe tools/wifi_config.py wifi.toml config.bin
+```
+
+The generator uses Espressif's NVS partition generator and produces a 24 KiB
+`config.bin`. The script is portable Python; Windows execution has not been
+verified here. Both `wifi.toml` and `config.bin` contain private credentials.
+Keep them private and outside the installer folder. The generic firmware
+contains no per-device credentials.
+
+### 2. Open the installer
+
+Serve only the prepared public installer folder. For example, if it is at
+`build/web-flash`, run from the project directory:
+
+```bash
+python3 -m http.server 8080 --directory build/web-flash --bind 127.0.0.1
+```
+
+On Windows, replace `python3` with `py -3`. Open
+`http://localhost:8080/` in Chrome or Edge. Internet access is needed to load
+the pinned ESP Web Tools 10.4.0 component from its CDN. A hosted installer must
+use HTTPS. The settings file is read locally through a browser object URL;
+the page does not upload it to a server.
+
+### 3. Flash the camera
+
+1. Close other serial monitors. Connect GPIO0 to GND and press RESET to enter
+   download mode.
+2. Select **Install firmware and device settings** and choose your private
+   `config.bin` file.
+3. Click the install/connect button, select your USB serial adapter, and
+   complete the ESP Web Tools installation dialog.
+4. Leave **Erase device** unchecked to preserve existing settings. A whole-chip
+   erase also deletes the separate settings partition.
+5. Wait for installation to finish. Remove GPIO0 from GND and press RESET to
+   start the firmware. Manual reset is required with the tested wiring.
+6. Read the DHCP address from the serial console at **115200 baud**, or find
+   the camera's node name in your router's DHCP client list. Open
+   `http://CAMERA_IP/`; see [viewer links](#connect-a-viewer).
+
+For later changes, the installer also offers:
+
+- **Update firmware — keep existing settings:** no config file is needed.
+- **Replace device settings only:** select a newly generated `config.bin`;
+  the matching firmware and partition layout must already be installed.
+
+The public merged image ends before the settings partition at `0x190000`,
+so ordinary firmware updates preserve settings. There is no Improv Wi-Fi form
+or setup access point. Without valid settings, firmware stays idle and logs
+instructions for flashing `config.bin`.
+
+## Develop and flash with VS Code and ESP-IDF
+
+This is the separate workflow for building or changing the firmware. Native
+ESP-IDF flashing remains supported alongside the browser installer.
+
+### Set up and build
+
+Install ESP-IDF **6.1** and its matching ESP32 toolchain and Python environment.
+The project requires GNU++26 support and disables exceptions and RTTI in its
+own firmware sources. See the [ESP-IDF documentation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/)
+for SDK installation.
+
+Create the private `wifi.toml` described in the browser instructions above.
+Settings are loaded from NVS at boot; building does not read or embed the TOML.
+The generator validates settings and keeps temporary credential files private.
+Preserve [dependencies.lock](dependencies.lock); generated build products,
+managed components, `wifi.toml` and `config.bin` are ignored by Git.
+
+With the SDK environment activated, build using:
+
+```bash
+idf.py build
+```
+
+Alternatively, the project's wrapper activates the SDK environment. Override
+its local installation defaults to match your machine:
+
+```bash
+export IDF_PATH="$HOME/esp/v6.1/esp-idf"
+export IDF_TOOLS_PATH="$HOME/.espressif"
+export IDF_PYTHON_ENV_PATH="$IDF_TOOLS_PATH/python_env/idf6.1_py3.12_env"
+bash tools/idf.sh build
+```
+
+Keep [dependencies.lock](dependencies.lock) in version control. The build pins
+`esp32-camera` 2.1.7, `esp_peer` 1.5.7 and `mdns` 1.14.0; the lock also records
+`esp_jpeg` 1.3.1 and `esp_libsrtp` 1.0.0. Use `sdkconfig.defaults` for clean-build
+defaults. Editing defaults does not override an existing generated `sdkconfig`;
+use Menuconfig to change that configuration.
+
+1. Install VS Code and Espressif's **ESP-IDF** extension. Configure it to use
+   ESP-IDF 6.1 and the matching toolchain/Python environment.
+2. Open this project's root folder in VS Code. Set the serial port to your
+   adapter (`/dev/ttyUSB0` on the tested Ubuntu host, or the appropriate `COM`
+   port on Windows).
+3. Run **Terminal → Run Build Task** (`Ctrl+Shift+B`) to build. Use
+   **Terminal → Run Task** for Flash, Monitor, Menuconfig and the configuration
+   tasks described below. The provided Bash wrapper tasks require Bash; with
+   a native Windows ESP-IDF terminal, use the extension's Build/Flash/Monitor
+   commands or `idf.py` instead.
+
+### Flash and monitor
+
+The examples use `/dev/ttyUSB0` at 115200 baud; select your adapter's actual
+port. Close other serial monitors before opening it.
+
+1. Connect GPIO0 to GND and reset or power-cycle the ESP32-CAM.
+2. Flash the complete build, including the bootloader and partition table:
+
+   ```bash
+   bash tools/idf.sh -p /dev/ttyUSB0 -b 115200 flash
+   ```
+
+3. On first installation, or when changing boot settings, flash the private
+   configuration while still in download mode:
+
+   ```bash
+   bash tools/idf.sh flash-config --port /dev/ttyUSB0
+   ```
+
+   This command generates `config.bin` from the local `wifi.toml` and writes
+   only the dedicated settings partition at `0x190000` (24 KiB). Normal
+   firmware-only updates omit this step and preserve settings. VS Code also
+   offers **Generate config.bin**, **Flash settings only**, **Flash firmware
+   and settings**, and **Prepare web installer** tasks.
+4. Remove GPIO0 from GND.
+5. Start the monitor, then press RESET:
+
+   ```bash
+   bash tools/idf.sh -p /dev/ttyUSB0 monitor
+   ```
+
+6. Read the assigned browser URL from UART. DHCP addresses can change.
+   Exit the monitor with `Ctrl+]`.
+
+The project deliberately disables automatic resets during flashing. USB
+adapter enumeration alone does not establish a bootloader connection. If the
+uploader receives no serial data while the camera is still reachable over
+Wi-Fi, check the GPIO0 jumper and reset sequence. Brownout messages during
+startup warrant checking the supply and wiring.
+
+### Prepare the browser installer
+
+After building, run:
+
+```bash
+bash tools/idf.sh web-flash --version development
+```
+
+The **Prepare web installer** VS Code task provides the same operation.
+`build/web-flash/` contains only the four public installer files. Host that
+folder over HTTPS or localhost as described above. The packager rejects
+unrelated/private files in its output directory. Never publish `config.bin`.
+This command prepares files locally; it does not deploy or upload them.
 
 ## Features and limits
 
@@ -57,90 +260,6 @@ Connect GPIO0 to GND at reset for download mode. Remove that jumper and reset
 for normal operation: GPIO0 supplies the camera clock at runtime. GPIO4 is the
 flash lamp pin and also an SD-card data pin. The board's VCC pin is a 3.3 V
 output.
-
-## Configure and build
-
-Install ESP-IDF **6.1** and its matching ESP32 toolchain and Python environment.
-The project requires GNU++26 support and disables exceptions and RTTI in its
-own firmware sources. See the [ESP-IDF documentation](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/)
-for SDK installation.
-
-Create a local `wifi.toml`, using [wifi.example.toml](wifi.example.toml) as a
-starting point. For example:
-
-```toml
-[wifi]
-node_name = "ESP32-CAM01"
-auto_off = true
-auto_off_minutes = 20
-ssid = "your-wifi-ssid"
-password = "your-wifi-password"
-```
-
-Use a 2.4 GHz network. Give each camera a unique `node_name`: 1–32 ASCII
-letters/digits with optional internal hyphens. It identifies the DHCP host,
-main browser page and status JSON. Missing identity/timeout settings default
-to `ESP32-CAM01`, `true` and `20`; configured durations must be whole minutes
-from 5 to 120.
-
-The build validates the TOML and generates `build/private_config/wifi_config.h`.
-`wifi.toml`, generated configuration, build products and managed components
-are ignored by Git. Credentials are embedded in firmware binaries; keep both
-the local configuration and those binaries private.
-
-With the SDK environment activated, build using:
-
-```bash
-idf.py build
-```
-
-Alternatively, the project's wrapper activates the SDK environment. Override
-its local installation defaults to match your machine:
-
-```bash
-export IDF_PATH="$HOME/esp/v6.1/esp-idf"
-export IDF_TOOLS_PATH="$HOME/.espressif"
-export IDF_PYTHON_ENV_PATH="$IDF_TOOLS_PATH/python_env/idf6.1_py3.12_env"
-bash tools/idf.sh build
-```
-
-Keep [dependencies.lock](dependencies.lock) in version control. The build pins
-`esp32-camera` 2.1.7, `esp_peer` 1.5.7 and `mdns` 1.14.0; the lock also records
-`esp_jpeg` 1.3.1 and `esp_libsrtp` 1.0.0. Use `sdkconfig.defaults` for clean-build
-defaults. Editing defaults does not override an existing generated `sdkconfig`;
-use Menuconfig to change that configuration.
-
-The included VS Code tasks provide Build, Flash, Monitor, Menuconfig and host
-tests. Adjust the Espressif extension's SDK, Python and serial-port settings
-for your workstation. `Ctrl+Shift+B` invokes the default Build task.
-
-## Flash and start
-
-The examples use `/dev/ttyUSB0` at 115200 baud; select your adapter's actual
-port. Close other serial monitors before opening it.
-
-1. Connect GPIO0 to GND and reset or power-cycle the ESP32-CAM.
-2. Flash the complete build, including the bootloader and partition table:
-
-   ```bash
-   bash tools/idf.sh -p /dev/ttyUSB0 -b 115200 flash
-   ```
-
-3. Remove GPIO0 from GND.
-4. Start the monitor, then press RESET:
-
-   ```bash
-   bash tools/idf.sh -p /dev/ttyUSB0 monitor
-   ```
-
-5. Read the assigned browser URL from UART. DHCP addresses can change.
-   Exit the monitor with `Ctrl+]`.
-
-The project deliberately disables automatic resets during flashing. USB
-adapter enumeration alone does not establish a bootloader connection. If the
-uploader receives no serial data while the camera is still reachable over
-Wi-Fi, check the GPIO0 jumper and reset sequence. Brownout messages during
-startup warrant checking the supply and wiring.
 
 ## Connect a viewer
 
@@ -191,7 +310,7 @@ return to VGA / quality 12 after reboot.
 
 The **Auto-off** checkbox and **5–120 minute** slider save immediately. They
 apply to the active video session and remain in RAM until reboot, which
-restores the compiled TOML defaults. The countdown stays anchored to the
+restores the values stored in NVS. The countdown stays anchored to the
 original session start: camera settings and snapshots do not reset it.
 Disabling auto-off removes the deadline; enabling or shortening it past the
 elapsed duration requests a stop. Policy edits cannot revive an already
@@ -255,10 +374,11 @@ integration remains untested.
 
 ## Validation and resource use
 
-The validated build uses a 1500 KiB factory app partition at `0x10000` on 4 MB
-flash, with no OTA slot. The latest measured application size is **1,383,392
-bytes**, leaving **152,608 bytes (about 10%)** in that partition. Sizes can
-change with toolchain and configuration. Three fixed JPEG buffers reserve
+The build uses a 1500 KiB factory app partition at `0x10000` on 4 MB flash,
+with no OTA slot. A separate 24 KiB NVS partition named `config` starts at
+`0x190000`; the original SDK NVS and PHY regions remain separate. The current
+application is **1,384,784 bytes**, leaving **151,216 bytes (about 10%)** in its
+partition. Sizes can change with toolchain and configuration. Three fixed JPEG buffers reserve
 1.5 MiB of mapped PSRAM at startup, in addition to driver frame buffers.
 
 On the tested board, WebRTC with mDNS candidates left approximately 48 KiB of
@@ -267,7 +387,14 @@ Internal free heap recovered to approximately 135 KiB after cleanup. Inspect
 `/status` on your board; PSRAM capacity alone does not describe internal RAM
 headroom for Wi-Fi and cryptography.
 
-Validation completed on the OV2640 board:
+The NVS firmware was flashed and tested on the OV2640 board. Settings-only,
+native ESP-IDF and merged firmware writes passed independent verification;
+the settings partition survived both firmware writes. Boot loaded the expected
+node name and auto-off defaults and connected to Wi-Fi. HTTP, snapshot, RTSP
+and WebRTC checks below passed again on this image. The user confirmed the
+installation works and requested no further tests. Restoration of NVS defaults
+after a RAM policy edit was not independently measured; actual browser USB
+flashing also remains unverified.
 
 | Check | Result |
 | --- | --- |
@@ -291,7 +418,10 @@ python3 tools/check_rtsp.py http://CAMERA_IP/
 ```
 
 Host tests require GCC with GNU++26 support (tested with GCC 15), Node.js,
-Python with Pillow, and FFmpeg. They use RTSP port 8554 and UDP ports 5004/5005
+Python with Pillow and `esp-idf-nvs-partition-gen`, and FFmpeg. If the NVS
+package is in a separate Python environment, set `CONFIG_TEST_PYTHON` to that
+Python executable before running `tools/test.sh`. Packaging checks can also
+be run after building with that Python and `tests/web_flash_package_tests.py`. They use RTSP port 8554 and UDP ports 5004/5005
 on the host. Firmware builds use the ESP-IDF cross-compiler; host fakes never
 enter firmware include paths.
 
@@ -309,3 +439,8 @@ checks ownership rejection and reconnects. These automated checks do not
 replace viewing the page in a real browser. Further implementation details
 and historical evidence are in the [architecture](docs/ARCHITECTURE.md) and
 [validation record](docs/VALIDATION.md).
+
+## CAD housing data
+
+Project housing models, drawings and manufacturing exports belong in
+[cad/housing/](cad/housing/), separate from firmware and build output.

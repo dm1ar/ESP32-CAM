@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #ifndef TEST_ESP_HEAP_CAPS_H
 #define TEST_ESP_HEAP_CAPS_H
 #include <cstddef>

@@ -1,9 +1,17 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #include "application.hpp"
 #include "board.hpp"
 #include "esp_chip_info.h"
 #include "esp_log.h"
 #include "esp_psram.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 namespace cam {
 esp_err_t Application::run() noexcept
@@ -25,9 +33,14 @@ esp_err_t Application::run() noexcept
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI("app", "PSRAM: %zu bytes", esp_psram_get_size());
+    result = settings_.load();
+    if (result != ESP_OK) { return result; }
+    if (!state_.setPolicy(settings_.policy(), esp_timer_get_time())) { return ESP_ERR_INVALID_ARG; }
     result = network_.start();
     if (result != ESP_OK) { return result; }
     result = frames_.start();
+    if (result != ESP_OK) { return result; }
+    result = webrtc_.start();
     if (result != ESP_OK) { return result; }
     result = web_.start();
     if (result == ESP_OK) { result = rtsp_.start(); }

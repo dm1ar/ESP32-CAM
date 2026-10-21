@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #ifndef TEST_QUEUE_H
 #define TEST_QUEUE_H
 #include <condition_variable>

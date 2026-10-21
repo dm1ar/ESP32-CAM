@@ -84,11 +84,20 @@ the toolchain, SDK or relevant boundary code changes.
 | D04 | SDK macros and headers use C constructs/GNU extensions, including `#include_next` and flexible arrays. | Firmware enables strict conversion/sign/shadow/format warnings and `-Werror`, but not `-Wpedantic`, which rejects SDK headers. Host tests add `-Wpedantic`. SDK default warning exclusions remain inherited. This is not a MISRA checker. |
 | D05 | Wi-Fi, HTTP, FreeRTOS and camera drivers allocate memory internally; an MJPEG server needs driver-managed frame buffers. | Except for the explicit D09 PSRAM buffers, no direct application heap allocation; static event group storage; two bounded camera buffers; failed startup is fatal; scoped stream/frame guards guarantee application cleanup attempts. Allocation inside upstream code is not claimed MISRA-compliant. |
 | D06 | The SDK requires C-linkage `app_main`, global driver APIs and process-lifetime callbacks. Application members are not shut down on normal `app_main` return. | One static `Application` owns all callback state; reset ends its lifetime. Boot failures fail fast. Wi-Fi acquisition intentionally waits indefinitely in timed 30-second intervals and logs progress. |
-| D07 | Small bounded `memcpy` operations transfer generated credentials into SDK byte arrays. A maximum-length SSID/PSK may occupy the full array without a trailing NUL. | TOML validation bounds input; compile-time assertions check destination capacity; credentials are never formatted as C strings or printed. |
+| D07 | Small bounded `memcpy` operations transfer validated NVS credentials into SDK byte arrays. A maximum-length SSID/PSK may occupy the full array without a trailing NUL. | The host generator validates TOML; firmware independently checks NVS schema/types, exact string terminators and byte lengths before startup. Fixed buffers allow 32-byte SSIDs and 64-byte hexadecimal PSKs. No credential contents are printed or compiled into the app. |
 | D09 | Three JPEG buffers allocate 512 KiB each from PSRAM at startup using `heap_caps_malloc`, with RAII destruction via `heap_caps_free`. | One cache and independent stream/snapshot copies; bounded copy with null/length checks, no per-frame allocation, no driver lease retained during send. Failure stops startup or returns HTTP 500. Host tests cover copy lifetime, reuse, failure and oversize rejection. |
+| D10 | Espressif `esp_peer` 1.5.7 includes prebuilt peer code and internally allocated ICE/DTLS/SCTP resources. Its C callbacks and mutable SDP/data pointers cross the SDK boundary. | One dedicated worker owns all peer APIs and closes the handle on failure/Stop. Persistent bounded SDP buffers, fixed JPEG packets, 32 KiB send/receive caches, one outstanding chunk and connection/ACK deadlines bound first-party use. No MISRA claim for the upstream binary. Flash build and mocked lifecycle tests pass; actual RAM/transport acceptance requires hardware tests. |
 | D08 (closed) | A temporary legacy SCCB compatibility trial did not resolve the observed OV2640 sensor-write failures. | The legacy backend selection has been reverted in source to the maintained I2C backend. The 10 MHz candidate passed repeated starts and original-JPEG decoding on the replacement board. No active legacy-driver deviation remains in source. |
 
 ## Verification and limits
+
+The WebRTC adapter additionally uses pinned Espressif `mdns` 1.14.0 to
+resolve browser host candidates before peer allocation (D05/D10 upstream
+allocation exception). At most four two-second queries per SDP; fixed
+4096-byte output and 16-byte IPv4 buffers; only candidate address tokens
+are replaced. The query-only service is freed on success or failure before
+DTLS. No browser privacy setting is changed. Sanitized tests cover bounds,
+unchanged credentials/fingerprints, failed resolution and cleanup.
 
 Run `bash tools/test.sh` for production parser/rate/state/camera tests with
 AddressSanitizer and UndefinedBehaviorSanitizer, a host mutex concurrency

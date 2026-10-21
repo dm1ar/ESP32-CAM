@@ -1,7 +1,9 @@
 # Firmware architecture
 
 This document describes the current MJPEG, RTSP and WebRTC implementation.
-For setup, wiring and viewer URLs, see the [README](../README.md).
+For setup, wiring and viewer URLs, see the [README](../README.md). Its primary
+installation instructions use ESP Web Tools; native VS Code/ESP-IDF development
+and flashing have a separate section.
 
 The firmware is C++ in namespace `cam`, built with GNU++26 on ESP-IDF 6.1.
 `app_main` owns one static `Application`; its members outlive all callbacks
@@ -15,10 +17,14 @@ classDiagram
     class Application {
         +run() esp_err_t
     }
+    class Configuration {
+        +load() esp_err_t
+        +nodeName() const_char_ptr
+        +policy() StreamPolicy
+    }
     class Network {
         +start() esp_err_t
         +nodeName() const_char_ptr
-        +streamPolicy() StreamPolicy
         +setStreamingPower(active) esp_err_t
     }
     class SharedState {
@@ -77,6 +83,8 @@ classDiagram
         +reset(now) void
         +sent(now, bytes) Rates
     }
+    Application *-- Configuration
+    Network --> Configuration : immutable boot settings
     Application *-- Network
     Application *-- SharedState
     Application *-- FrameService
@@ -103,11 +111,13 @@ classDiagram
     WebRtcServer ..> RateMeter
 ```
 
-`Application` constructs `Network`, `Camera`, `SharedState`, `FrameService`,
+`Application` constructs `Configuration`, `Network`, `Camera`, `SharedState`, `FrameService`,
 `WebRtcServer`, `WebServer` and `RtspServer` in dependency order. Boot latches
-the flash lamp off, asserts camera power-down, checks PSRAM, connects Wi-Fi,
+the flash lamp off, asserts camera power-down, checks PSRAM, loads NVS settings,
+applies the boot policy, connects Wi-Fi,
 and starts the camera worker, WebRTC worker, HTTP servers and RTSP listener.
-A startup failure is fatal to application startup.
+Missing/invalid settings return a provisioning log message and leave services
+unstarted, without a reboot loop. Other startup failures remain fatal.
 
 ## FreeRTOS execution contexts
 
@@ -333,14 +343,27 @@ resolving DNS or doing network I/O. No blocking operations occur under these
 locks. Settings are compared by value and applied by the camera worker at a
 safe frame boundary. Reset restores VGA / JPEG quality 12.
 
-`tools/wifi_config.py` validates the local TOML and generates constants for
-Wi-Fi credentials, node name and initial `StreamPolicy`. Only the network
-translation unit includes the private generated header. The node name is a
-1–32 character ASCII hostname label, used by DHCP, UART, main UI and status.
-It does not guarantee router DNS or `<node_name>.local` availability.
+`tools/wifi_config.py` validates local TOML and generates a 24 KiB NVS image
+using Espressif's partition generator. Namespace `camera` contains schema
+version 1, strings `ssid`, `password`, `node_name`, an `auto_off` u8 and a
+`minutes` u32. All keys are required in the image; the generator supplies
+omitted TOML defaults. Credential strings retain exact UTF-8 bytes.
+
+`Configuration::load()` initializes and opens partition `config` read-only,
+checks schema, NVS key types, string lengths/terminators, hostname syntax and
+policy bounds, then atomically accepts a complete candidate configuration.
+Failure never erases that partition or applies partial settings. The object
+is owned by `Application`; Network borrows it and HTTP/RTSP borrow its stable
+node-name storage. It is loaded once before network/service tasks start.
+There are no compiled credential fallbacks or private generated headers.
+The Wi-Fi driver still uses RAM storage; its SDK NVS is a separate partition.
+
+The node name is a 1–32 character ASCII hostname label, used by DHCP, UART,
+main UI, RTSP identity and status. It does not guarantee router DNS or
+`<node_name>.local` availability.
 
 `SharedState::begin()` records monotonic start time and an optional deadline.
-Auto-off defaults to enabled at 20 minutes; both TOML and runtime policy
+The configuration generator defaults auto-off to enabled at 20 minutes; both TOML and runtime policy
 require a whole duration from 5 to 120 minutes. `setPolicy()` evaluates an
 already expired deadline before changing policy and recomputes the deadline
 from the original session start. Disabling removes it; shortening past elapsed
@@ -397,9 +420,10 @@ The WebRTC page separately displays received frame count and JPEG size.
 
 ## Memory, build boundaries and verification
 
-The single-app partition is 1500 KiB at `0x10000` on 4 MB flash. NVS and PHY
-regions are retained; there is no OTA slot or image filesystem. The validated
-WebRTC/mDNS build is 1,383,392 bytes, leaving 152,608 bytes in the app partition.
+The custom partition table keeps the 1500 KiB app at `0x10000` on 4 MB flash,
+retains SDK NVS at `0x9000` (24 KiB) and PHY at `0xf000`, and adds settings NVS
+at `0x190000` (24 KiB). There is no OTA slot or image filesystem. The NVS-based
+build is 1,384,784 bytes, leaving 151,216 bytes in the app partition.
 PSRAM allocations include three 512 KiB JPEG copies and two driver buffers.
 The tested 8 MB PSRAM chip maps 4 MB; internal RAM remains a separate budget.
 
@@ -420,8 +444,9 @@ remain explicit failures.
 Own firmware sources use strict warnings as errors, no exceptions and no RTTI.
 Managed components keep their upstream compiler settings. Dependency versions
 are locked: camera 2.1.7, JPEG 1.3.1, peer 1.5.7, libsrtp 1.0.0 and mDNS 1.14.0
-on ESP-IDF 6.1.0. Generated credential headers and firmware binaries stay
-private and outside version control.
+on ESP-IDF 6.1.0. Private TOML, config.bin and temporary credential files stay outside version
+control. The generic firmware and installer image do not contain local
+credentials and can be distributed after validation.
 
 Host tests isolate SDK fakes from firmware include paths. Sanitized production
 model, camera, frame-store, parser and lifecycle tests complement browser
@@ -434,3 +459,50 @@ and actual openHAB integration remain untested.
 See [validation](VALIDATION.md) for evidence and commands, and
 [coding guidelines](CODING_GUIDELINES.md) for the MISRA-oriented rules and
 SDK/language deviations. No formal MISRA compliance is claimed.
+
+## Browser installation with ESP Web Tools
+
+`prepare_web_flash.py` validates the built partition table and image addresses,
+then merges only bootloader, partition table and application, using DIO/40 MHz/
+4 MB headers for ESP Web Tools. The merged image ends before `0x190000`,
+including sector erasure boundaries, so firmware-only writes preserve config
+NVS. The private NVS image is never included in the public package. Erase-chip
+operations still remove it.
+
+The installer offers install-plus-config, firmware-only and config-only modes.
+Its manifest uses an ESP32 build with public firmware at offset zero and,
+when selected, a local browser Blob URL for configuration at `0x190000`.
+Config files are size-checked and read locally, with no upload endpoint.
+ESP Web Tools' erase prompt stays enabled: disabling that prompt on firmware
+without Improv would default to erasing the whole chip. Users must leave the
+erase checkbox unchecked to preserve existing settings.
+
+## VS Code and native ESP-IDF development
+
+Native ESP-IDF Build/Flash/Monitor remain available. `idf.py flash` writes the
+normal public image parts and preserves the config partition. The wrapper's
+`config` command generates private settings, `flash-config` generates/writes
+only settings with manual reset behavior, and `web-flash` prepares the public
+site. VS Code exposes these and a sequential firmware-plus-settings task.
+There is no Improv implementation or runtime credential-writing HTTP API in
+this change. Hardware settings-only, native IDF and merged-image serial writes
+passed independent digest verification. The settings partition survived both
+firmware writes, and boot loaded the expected identity/policy and joined Wi-Fi.
+HTTP, snapshot, RTSP and WebRTC regression checks passed on the NVS image.
+The user subsequently confirmed the installation works and requested no further
+tests. Restoration after RAM policy edits was not independently measured;
+actual browser USB flashing also remains unverified.
+
+## Source ownership and housing data
+
+Project-owned C/C++ sources and headers, HTML, JavaScript (including `.mjs`)
+and CSS use the Axel Richter 2026 SPDX header with license identifier
+`PolyForm-Noncommercial-1.0.0`. HTML embeds the header inside an HTML comment
+after the doctype. Managed dependencies retain their upstream licensing and
+are excluded from this source-header change.
+
+Housing CAD source, drawings and manufacturing exports belong in
+[`cad/housing/`](../cad/housing/). These files are separate from firmware,
+public installer assets and generated build products; they are not embedded
+in the application or installer. The directory contains `esp32cam_raximax.stp`, the five-part housing assembly.
+Its metadata identifies Axel Richter as author and applies CC BY-NC-SA 4.0.

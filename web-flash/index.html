@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+-->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32-CAM installer</title>
+<style>body{font:17px system-ui;line-height:1.6;margin:3rem auto;padding:0 1.2rem;max-width:760px;background:#111b25;color:#edf4f7}a{color:#8dcfff}select,input,button{font:inherit;max-width:100%;padding:.5rem}label{display:block;margin:1rem 0}button{cursor:pointer}#install{margin:1.5rem 0}code{background:#263543;padding:.1rem .3rem}aside{border-left:3px solid #8dcfff;padding-left:1rem}.error{color:#ffb4ab}</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+</head><body>
+<h1>ESP32-CAM installer</h1>
+<p>Install the camera firmware without compiling it. Use a desktop browser with Web Serial support, such as Chrome or Edge, over HTTPS or localhost.</p>
+<ol>
+<li>Connect your USB-to-UART bridge using 3.3 V logic and a common ground. Supply the camera at its 5V pin.</li>
+<li>Connect GPIO0 to GND, then reset the camera to enter download mode. Close other serial monitors.</li>
+<li>Select an operation below. For device settings, generate a private <code>config.bin</code> from your <code>wifi.toml</code> using the supplied script.</li>
+<li>Click Connect, choose the serial port, and follow ESP Web Tools. Leave <strong>Erase device</strong> unchecked to retain settings during updates.</li>
+<li>After flashing, remove GPIO0 from GND and press RESET. Open Logs &amp; Console to read the camera's DHCP address, then visit that address.</li>
+</ol>
+<label>Operation <select id="mode"><option value="install">Install firmware and device settings</option><option value="update">Update firmware — keep existing settings</option><option value="config">Replace device settings only</option></select></label>
+<label id="config-label">Private configuration <input id="config" type="file" accept=".bin"></label>
+<aside><p>Your configuration file is read locally in this browser and sent to the camera through the serial port. This page does not upload it to a server. Keep it private: it contains Wi-Fi credentials.</p>
+<p>Erasing the entire device removes settings. A device with no valid settings stays idle and reports how to flash <code>config.bin</code>; it does not start an access point or an Improv Wi-Fi setup wizard.</p></aside>
+<p id="status" role="status">Select a config.bin to install firmware and settings.</p>
+<div id="install"></div>
+<p>Configuration generation: <code>python tools/wifi_config.py wifi.toml config.bin</code> (Python 3.11+ and <code>esp-idf-nvs-partition-gen</code>). A config-only install requires the matching camera firmware/partition layout.</p>
+<p><a href="https://github.com/dm1ar">Project author on GitHub</a> · <a href="https://esphome.github.io/esp-web-tools/">About ESP Web Tools</a></p>
+<script type="module" src="installer.mjs"></script>
+</body></html>

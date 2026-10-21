@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 // Exercise the real embedded controller with a fake DOM, HTTP, and clock.
 // This verifies command/poll behavior; it is not a hardware/browser MJPEG test.
 import assert from 'node:assert/strict';

@@ -1,4 +1,12 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #include "web_server.hpp"
+#include "http_stream.hpp"
 #include <array>
 #include <cinttypes>
 #include <cstdio>
@@ -17,10 +25,19 @@
 // objects. Keep the extension confined to this translation unit (deviation D03).
 extern const char indexHtmlStart[] asm("_binary_index_html_start");
 extern const char indexHtmlEnd[] asm("_binary_index_html_end");
+extern const char webrtcHtmlStart[] asm("_binary_webrtc_html_start");
+extern const char webrtcHtmlEnd[] asm("_binary_webrtc_html_end");
 
 namespace cam {
 namespace {
 constexpr char tag[]{"web"};
+
+[[nodiscard]] esp_err_t sendRaw(httpd_req_t* request, const char* data, std::size_t size) noexcept
+{
+    return httpstream::sendAll({data, size}, [request](const char* bytes, std::size_t length) {
+        return httpd_send(request, bytes, length);
+    }) ? ESP_OK : ESP_FAIL;
+}
 
 [[nodiscard]] esp_err_t responseHeaders(httpd_req_t* request, const char* type) noexcept
 {
@@ -74,6 +91,46 @@ esp_err_t WebServer::index(httpd_req_t* request) noexcept
     // The embedding appends one NUL. Linker-symbol subtraction is reviewed D03.
     const auto length = indexHtmlEnd - indexHtmlStart - 1;
     return (result == ESP_OK) ? httpd_resp_send(request, indexHtmlStart, length) : result;
+}
+
+esp_err_t WebServer::webrtcPage(httpd_req_t* request) noexcept
+{
+    const auto result = responseHeaders(request, "text/html; charset=utf-8");
+    return (result == ESP_OK) ? httpd_resp_send(request, webrtcHtmlStart,
+        webrtcHtmlEnd - webrtcHtmlStart - 1) : result;
+}
+esp_err_t WebServer::webrtcOffer(httpd_req_t* request) noexcept
+{
+    if ((request->content_len == 0U) || (request->content_len >= offer_.size())) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "SDP must be smaller than 4096 bytes");
+    }
+    std::size_t received{0U};
+    while (received < request->content_len) {
+        const auto count = httpd_req_recv(request, offer_.data() + received, request->content_len - received);
+        if ((count <= 0) || (static_cast<std::size_t>(count) > request->content_len - received)) {
+            return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Incomplete SDP");
+        }
+        received += static_cast<std::size_t>(count);
+    }
+    offer_[received] = '\0';
+    const auto result = webrtc_.offer({offer_.data(), received});
+    if (result == ESP_ERR_INVALID_STATE) {
+        static_cast<void>(httpd_resp_set_status(request, "409 Conflict"));
+        return httpd_resp_sendstr(request, "Another video session is active");
+    }
+    if (result == ESP_ERR_INVALID_RESPONSE) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+            "Cannot resolve browser ICE addresses on the LAN; check multicast/mDNS connectivity");
+    }
+    if (result != ESP_OK) { return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "WebRTC negotiation failed"); }
+    const auto answer = webrtc_.answer();
+    const auto headers = responseHeaders(request, "application/sdp");
+    return (headers == ESP_OK) ? httpd_resp_send(request, answer.data(), static_cast<ssize_t>(answer.size())) : headers;
+}
+esp_err_t WebServer::webrtcClose(httpd_req_t* request) noexcept
+{
+    const auto result = webrtc_.stop();
+    return (result == ESP_OK) ? json(request, "{\"stopping\":true}") : httpd_resp_send_500(request);
 }
 
 esp_err_t WebServer::capture(httpd_req_t* request) noexcept
@@ -171,7 +228,7 @@ esp_err_t WebServer::status(httpd_req_t* request) noexcept
         : ((snapshot.sensorPid == 0U) ? "OV2640 (not yet detected)" : "Unknown sensor");
     const bool pending = snapshot.streaming
         && (!snapshot.hasApplied || (snapshot.selected != snapshot.applied));
-    std::array<char, 1024U> body{};
+    std::array<char, 1280U> body{};
     const auto length = std::snprintf(body.data(), body.size(),
         "{\"sensor\":\"%s\",\"sensor_pid\":\"0x%04x\",\"width\":%" PRIu32 ",\"height\":%" PRIu32 ","
         "\"format\":\"JPEG\",\"jpeg_quality\":%" PRIu32 ",\"fps\":%.2f,\"kib_per_second\":%.2f,"
@@ -182,7 +239,8 @@ esp_err_t WebServer::status(httpd_req_t* request) noexcept
         "\"node_name\":\"%s\",\"auto_off\":%s,\"auto_off_minutes\":%" PRIu32 ","
         "\"stream_limit_seconds\":%" PRIu32 ","
         "\"stream_remaining_seconds\":%" PRIu32 ",\"stream_timed_out\":%s,"
-        "\"camera_error_code\":%" PRIi32 "}",
+        "\"camera_error_code\":%" PRIi32 ",\"webrtc_state\":\"%s\","
+        "\"internal_heap_free_bytes\":%zu,\"internal_heap_largest_bytes\":%zu}",
         sensor, static_cast<unsigned>(snapshot.sensorPid), snapshot.width, snapshot.height,
         snapshot.selected.quality, static_cast<double>(snapshot.rates.fps),
         static_cast<double>(snapshot.rates.kibPerSecond), snapshot.frameBytes,
@@ -191,10 +249,11 @@ esp_err_t WebServer::status(httpd_req_t* request) noexcept
         esp_get_free_heap_size(), esp_timer_get_time() / 1'000'000,
         esp_get_idf_version(), selected->name.data(), stateName(snapshot.cameraState),
         ((powerResult == ESP_OK) && (powerSave != WIFI_PS_NONE)) ? "true" : "false",
-        pending ? "true" : "false", Network::nodeName(), snapshot.policy.autoOff ? "true" : "false",
+        pending ? "true" : "false", nodeName_, snapshot.policy.autoOff ? "true" : "false",
         snapshot.policy.limitSeconds / 60U, snapshot.policy.limitSeconds,
         streamRemainingSeconds(snapshot, now), snapshot.streamTimedOut ? "true" : "false",
-        snapshot.cameraError);
+        snapshot.cameraError, webrtc_.phase(), heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if ((length < 0) || (static_cast<std::size_t>(length) >= body.size())) {
         return httpd_resp_send_500(request);
     }
@@ -202,7 +261,7 @@ esp_err_t WebServer::status(httpd_req_t* request) noexcept
     return (result == ESP_OK) ? httpd_resp_send(request, body.data(), length) : result;
 }
 
-esp_err_t WebServer::sendFrame(httpd_req_t* request, RateMeter& meter) noexcept
+esp_err_t WebServer::sendFrame(httpd_req_t* request, RateMeter& meter, bool& responseStarted) noexcept
 {
     const auto captured = frames_.capture(false);
     if (captured != ESP_OK) { return captured; }
@@ -225,15 +284,20 @@ esp_err_t WebServer::sendFrame(httpd_req_t* request, RateMeter& meter) noexcept
     if ((length <= 0) || (static_cast<std::size_t>(length) >= header.size())) {
         return ESP_ERR_INVALID_SIZE;
     }
-    auto result = httpd_resp_send_chunk(request, header.data(), length);
+    auto result = ESP_OK;
+    if (!responseStarted) {
+        // Delay the raw headers until capture succeeds, preserving initial HTTP 500.
+        responseStarted = true;
+        result = sendRaw(request, httpstream::headers.data(), httpstream::headers.size());
+    }
+    if (result == ESP_OK) { result = sendRaw(request, header.data(), static_cast<std::size_t>(length)); }
     if (result == ESP_OK) {
         // D02: char access to the JPEG object representation for the SDK socket
         // API. No ownership transfer and no buffer modification take place.
-        result = httpd_resp_send_chunk(request, reinterpret_cast<const char*>(frame.data),
-                                       static_cast<ssize_t>(frame.size));
+        result = sendRaw(request, reinterpret_cast<const char*>(frame.data), frame.size);
     }
     if (result == ESP_OK) {
-        result = httpd_resp_send_chunk(request, "\r\n", 2);
+        result = sendRaw(request, "\r\n", 2U);
     }
     if (result == ESP_OK) {
         const auto now = esp_timer_get_time();
@@ -252,7 +316,7 @@ esp_err_t WebServer::stream(httpd_req_t* request) noexcept
         static_cast<void>(httpd_resp_set_status(request, "503 Service Unavailable"));
         return httpd_resp_sendstr(request, "A video session is already active, or startup failed");
     }
-    result = responseHeaders(request, "multipart/x-mixed-replace;boundary=esp32camframe");
+    bool responseStarted{false};
     RateMeter meter{};
     meter.reset(esp_timer_get_time());
     while (result == ESP_OK) {
@@ -267,12 +331,12 @@ esp_err_t WebServer::stream(httpd_req_t* request) noexcept
         if (state_.shouldStop(esp_timer_get_time())) {
             break;
         }
-        result = sendFrame(request, meter);
+        result = sendFrame(request, meter, responseStarted);
         const auto cameraError = state_.snapshot().cameraError;
         if (cameraError != 0) {
             result = cameraError;
             session.fail(result);
-            if (!desired.hasApplied) {
+            if (!responseStarted) {
                 static_cast<void>(httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
                     "Camera capture failed; see /status camera_error_code"));
             }
@@ -281,11 +345,13 @@ esp_err_t WebServer::stream(httpd_req_t* request) noexcept
         vTaskDelay(pdMS_TO_TICKS(10U));
     }
     if (result == ESP_OK) {
-        // Close the multipart response and then the HTTP chunked transfer.
-        result = httpd_resp_send_chunk(request, "--esp32camframe--\r\n", HTTPD_RESP_USE_STRLEN);
-        if (result == ESP_OK) {
-            result = httpd_resp_send_chunk(request, nullptr, 0);
-        }
+        result = responseStarted
+            ? sendRaw(request, httpstream::closing.data(), httpstream::closing.size())
+            : httpd_resp_send(request, nullptr, 0);
+    }
+    // Raw live responses are delimited by connection close, including Stop/timeout.
+    if ((result == ESP_OK) && responseStarted) {
+        result = httpd_sess_trigger_close(request->handle, httpd_req_to_sockfd(request));
     }
     return result;
 }
@@ -297,6 +363,7 @@ esp_err_t WebServer::start() noexcept
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144U;
+    config.max_uri_handlers = 12U;
     config.lru_purge_enable = true;
     config.max_open_sockets = 3U;
     config.send_wait_timeout = 5U;
@@ -305,7 +372,7 @@ esp_err_t WebServer::start() noexcept
     if (result != ESP_OK) { return result; }
 
     // Value-initialize every SDK structure so future optional fields stay zero.
-    std::array<httpd_uri_t, 8U> routes{};
+    std::array<httpd_uri_t, 11U> routes{};
     routes[0U].uri = "/";
     routes[0U].handler = &bridge<&WebServer::index>;
     routes[1U].uri = "/health";
@@ -316,6 +383,12 @@ esp_err_t WebServer::start() noexcept
     routes[3U].handler = &bridge<&WebServer::control>;
     routes[4U].uri = "/stop";
     routes[4U].handler = &bridge<&WebServer::stop>;
+    routes[8U].uri = "/webrtc";
+    routes[8U].handler = &bridge<&WebServer::webrtcPage>;
+    routes[9U].uri = "/webrtc/offer";
+    routes[9U].handler = &bridge<&WebServer::webrtcOffer>;
+    routes[10U].uri = "/webrtc/close";
+    routes[10U].handler = &bridge<&WebServer::webrtcClose>;
     routes[7U].uri = "/auto-off";
     routes[7U].handler = &bridge<&WebServer::autoOff>;
     routes[6U].uri = "/capture";
@@ -323,7 +396,7 @@ esp_err_t WebServer::start() noexcept
     routes[5U].uri = "/stream";
     routes[5U].handler = &bridge<&WebServer::stream>;
     for (std::size_t i{0U}; i < routes.size(); ++i) {
-        routes[i].method = ((i == 3U) || (i == 4U) || (i == 7U)) ? HTTP_POST : HTTP_GET;
+        routes[i].method = ((i == 3U) || (i == 4U) || (i == 7U) || (i == 9U) || (i == 10U)) ? HTTP_POST : HTTP_GET;
         routes[i].user_ctx = this;
         if (i == 5U) {
             // A blocking MJPEG handler must never run on the page/status task.

@@ -1,12 +1,20 @@
-"""Validate local Wi-Fi TOML and generate a private build header, without logging secrets."""
+"""Validate camera settings and create a private NVS config.bin (Python 3.11+)."""
 import argparse
+import csv
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 import re
 import sys
 import tomllib
 
 
-def generate(source: Path, destination: Path) -> None:
+CONFIG_SIZE = 0x6000
+CONFIG_OFFSET = 0x190000
+
+
+def load(source: Path) -> dict:
     try:
         with source.open("rb") as stream:
             wifi = tomllib.load(stream)["wifi"]
@@ -37,33 +45,56 @@ def generate(source: Path, destination: Path) -> None:
     auto_off_minutes = wifi.get("auto_off_minutes", 20)
     if type(auto_off) is not bool:
         raise ValueError("Set [wifi] auto_off to a TOML boolean (true or false).")
-    # Seconds are exposed as uint32_t in JSON. Reject booleans, fractions,
-    # zero and overflow before producing C++ constants, even when disabled.
+    # Reject booleans, fractions and out-of-range policy values before
+    # generating NVS entries, even when automatic stop is disabled.
     if type(auto_off_minutes) is not int or not 5 <= auto_off_minutes <= 120:
         raise ValueError("Set [wifi] auto_off_minutes to an integer from 5 to 120.")
 
-    def array(name: str, value: bytes) -> str:
-        return f"static const unsigned char {name}[] = {{{','.join(map(str, value))},0}};\n"
+    return {"ssid": ssid, "password": password, "node_name": node_name,
+            "auto_off": auto_off, "auto_off_minutes": auto_off_minutes}
 
-    header = "// Generated from wifi.toml. Contains credentials; do not commit.\n#pragma once\n"
-    header += array("APP_WIFI_SSID", ssid_bytes)
-    header += array("APP_WIFI_PASSWORD", password_bytes)
-    header += f'inline constexpr char APP_NODE_NAME[] = "{node_name}";\n'
-    header += f'inline constexpr bool APP_AUTO_OFF = {str(auto_off).lower()};\n'
-    header += f'inline constexpr unsigned APP_AUTO_OFF_MINUTES = {auto_off_minutes}U;\n'
+
+def generate(source: Path, destination: Path) -> None:
+    settings = load(source)
+    destination = destination.resolve()
+    if destination == source.resolve():
+        raise ValueError("Output must differ from wifi.toml.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if not destination.exists() or destination.read_text() != header:
-        destination.write_text(header)
-        destination.chmod(0o600)
+    # All intermediate credentials stay in a private directory. File entries
+    # preserve spaces, commas, quotes and newlines exactly through the SDK tool.
+    with tempfile.TemporaryDirectory(prefix="camera-config-", dir=destination.parent) as folder:
+        private = Path(folder)
+        rows = [["key", "type", "encoding", "value"], ["camera", "namespace", "", ""],
+                ["schema", "data", "u32", "1"]]
+        for key in ("ssid", "password", "node_name"):
+            item = private / key
+            item.write_bytes(settings[key].encode("utf-8"))
+            item.chmod(0o600)
+            rows.append([key, "file", "string", str(item)])
+        rows += [["auto_off", "data", "u8", int(settings["auto_off"])],
+                 ["minutes", "data", "u32", settings["auto_off_minutes"]]]
+        csv_path = private / "settings.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerows(rows)
+        image = private / "config.bin"
+        result = subprocess.run([sys.executable, "-m", "esp_idf_nvs_partition_gen",
+                                 "generate", str(csv_path), str(image), hex(CONFIG_SIZE)],
+                                capture_output=True, check=False)
+        if result.returncode or not image.exists() or image.stat().st_size != CONFIG_SIZE:
+            raise ValueError("NVS generation failed. Install esp-idf-nvs-partition-gen in this Python environment; check output access.")
+        image.chmod(0o600)
+        os.replace(image, destination)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("source", type=Path)
-    parser.add_argument("destination", type=Path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path, nargs="?", default=Path("wifi.toml"))
+    parser.add_argument("destination", type=Path, nargs="?", default=Path("build/private_config/config.bin"))
     args = parser.parse_args()
     try:
         generate(args.source, args.destination)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+    except (ValueError, OSError) as exc:
+        # OSError filenames can contain user input; keep diagnostics generic.
+        print(str(exc) if isinstance(exc, ValueError) else "Cannot read/write configuration files.", file=sys.stderr)
         sys.exit(1)
+    print("Private config.bin generated; flash at 0x190000. Do not publish this file.")

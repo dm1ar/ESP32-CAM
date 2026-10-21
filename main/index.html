@@ -1,4 +1,12 @@
 <!doctype html>
+<!--
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+-->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -37,6 +45,7 @@
   </div>
   <p class="hint">Auto-off changes save immediately for this boot. Time is measured from the stream start.</p>
   <p class="hint">Lower quality number = better image and more bandwidth. Settings reset to VGA / 12 after reboot.</p>
+  <p><a href="/webrtc" style="color:#8dcfff">Open WebRTC viewer</a> — close the current video first.</p>
   <button id="start">Start stream</button><button id="stop">Stop stream</button>
   <p id="status" role="status">Ready — camera in standby</p>
   <p id="telemetry" class="telemetry" aria-live="polite">Loading camera status...</p>

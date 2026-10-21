@@ -1,9 +1,15 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #include "network.hpp"
 #include <cstring>
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
-#include "wifi_config.h" // Generated privately; never log credential contents.
 
 namespace cam {
 namespace {
@@ -11,16 +17,9 @@ constexpr char tag[]{"network"};
 constexpr EventBits_t connectedBit{BIT0};
 }
 
-const char* Network::nodeName() noexcept
+const char* Network::nodeName() const noexcept
 {
-    return APP_NODE_NAME;
-}
-
-StreamPolicy Network::streamPolicy() noexcept
-{
-    // Only this translation unit includes the private generated header.
-    // Rebuilding after editing wifi.toml changes the policy for the next boot.
-    return {APP_AUTO_OFF, APP_AUTO_OFF_MINUTES * 60U};
+    return settings_.nodeName();
 }
 
 void Network::logUrl() const noexcept
@@ -99,12 +98,11 @@ esp_err_t Network::start() noexcept
     result = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &Network::onEvent, this);
     if (result != ESP_OK) { return result; }
     wifi_config_t config{};
-    // The generator permits a full-width 32-byte SSID and 64-byte hex PSK;
-    // these SDK arrays need not have an extra NUL when completely occupied.
-    static_assert((sizeof(APP_WIFI_SSID) - 1U) <= sizeof(config.sta.ssid));
-    static_assert((sizeof(APP_WIFI_PASSWORD) - 1U) <= sizeof(config.sta.password));
-    std::memcpy(config.sta.ssid, APP_WIFI_SSID, sizeof(APP_WIFI_SSID) - 1U);
-    std::memcpy(config.sta.password, APP_WIFI_PASSWORD, sizeof(APP_WIFI_PASSWORD) - 1U);
+    // NVS values were checked before startup, including full-width SSID/PSK.
+    const auto ssid = settings_.ssid();
+    const auto password = settings_.password();
+    std::memcpy(config.sta.ssid, ssid.data(), ssid.size());
+    std::memcpy(config.sta.password, password.data(), password.size());
     config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
     result = esp_wifi_set_mode(WIFI_MODE_STA);

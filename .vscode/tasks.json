@@ -5,37 +5,110 @@
             "label": "ESP32-CAM: Host tests",
             "type": "process",
             "command": "bash",
-            "args": ["${workspaceFolder}/tools/test.sh"],
+            "args": [
+                "${workspaceFolder}/tools/test.sh"
+            ],
             "group": "test",
-            "problemMatcher": ["$gcc"]
+            "problemMatcher": [
+                "$gcc"
+            ]
         },
         {
             "label": "ESP32-CAM: Build",
             "type": "process",
             "command": "bash",
-            "args": ["${workspaceFolder}/tools/idf.sh", "build"],
-            "group": {"kind": "build", "isDefault": true},
-            "problemMatcher": ["$gcc"]
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "build"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ]
         },
         {
             "label": "ESP32-CAM: Flash (manual boot mode)",
             "type": "process",
             "command": "bash",
-            "args": ["${workspaceFolder}/tools/idf.sh", "-p", "${config:idf.port}", "-b", "115200", "flash"],
-            "problemMatcher": ["$gcc"]
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "-p",
+                "${config:idf.port}",
+                "-b",
+                "115200",
+                "flash"
+            ],
+            "problemMatcher": [
+                "$gcc"
+            ]
         },
         {
             "label": "ESP32-CAM: Monitor",
             "type": "process",
             "command": "bash",
-            "args": ["${workspaceFolder}/tools/idf.sh", "-p", "${config:idf.monitorPort}", "monitor"],
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "-p",
+                "${config:idf.monitorPort}",
+                "monitor"
+            ],
             "problemMatcher": []
         },
         {
             "label": "ESP32-CAM: Menuconfig",
             "type": "process",
             "command": "bash",
-            "args": ["${workspaceFolder}/tools/idf.sh", "menuconfig"],
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "menuconfig"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "ESP32-CAM: Generate config.bin",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "config"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "ESP32-CAM: Flash settings only (manual boot mode)",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "flash-config",
+                "--port",
+                "${config:idf.port}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "ESP32-CAM: Flash firmware and settings (manual boot mode)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "ESP32-CAM: Flash (manual boot mode)",
+                "ESP32-CAM: Flash settings only (manual boot mode)"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "ESP32-CAM: Prepare web installer",
+            "type": "process",
+            "command": "bash",
+            "args": [
+                "${workspaceFolder}/tools/idf.sh",
+                "web-flash"
+            ],
+            "dependsOn": [
+                "ESP32-CAM: Build"
+            ],
             "problemMatcher": []
         }
     ]

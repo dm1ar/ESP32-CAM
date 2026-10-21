@@ -1,5 +1,228 @@
 # Refactor validation
 
+## NVS configuration and ESP Web Tools (branch web-flash)
+
+New code builds a generic application without reading wifi.toml. Settings
+are generated separately as a 24 KiB NVS image at 0x190000, namespace camera,
+schema 1. Existing SDK NVS/PHY/app addresses remain intact; the custom table
+adds only the dedicated settings partition. Startup reads and validates the
+entire configuration before Wi-Fi/service startup. Missing, corrupt, wrong
+schema/type or out-of-range data does not erase config, start Wi-Fi or enter
+a reboot loop. Runtime slider edits remain RAM-only; reboot reloads NVS.
+
+Build and host validation:
+
+- ESP-IDF build passes; application 1,384,784 bytes, 151,216 app bytes free.
+- Complete sanitized host/model/browser/RTSP/WebRTC suite passes, including
+  production Configuration against host NVS fakes and transactional rejection.
+- Dummy TOML → official Espressif NVS image round trips validate entry/page
+  CRCs and exact strings, including 32-byte SSID, 64-byte hex PSK, UTF-8,
+  spaces, commas, quotes and newlines. Output mode is 0600; temporary private
+  data is removed. Failed validation/generation preserves an existing output.
+- Public app/merged-image scans found neither local SSID nor local password.
+  Values were checked in memory and never printed. No private config is
+  included in the four-file public installer directory.
+- Packaging verifies partition/image boundaries. Simulated sector erasure
+  of the public merged image preserves config at 0x190000; config-only writes
+  preserve preceding firmware. A private file in the output directory causes
+  packaging to fail instead of publishing it accidentally.
+- A real headless Chromium test loaded the pinned ESP Web Tools 10.4.0 custom
+  element from the public package served on localhost. Install/update/config
+  modes produced the expected manifests and local Blob URLs. No upload
+  requests, page errors or serial-port access occurred. Screenshot inspected.
+
+Commands: bash tools/idf.sh build; bash tools/idf.sh config;
+bash tools/idf.sh web-flash. Run tools/test.sh with CONFIG_TEST_PYTHON pointing
+to a Python with esp-idf-nvs-partition-gen, and run
+tests/web_flash_package_tests.py with esptool after a build. Generated public
+output is build/web-flash; private output is build/private_config/config.bin.
+The wrapper/VS Code also expose settings-only and firmware-plus-settings
+flashing. No Improv Serial provisioning or credential-writing HTTP API is
+implemented; settings are supplied through config.bin.
+
+Hardware acceptance on 2026-10-21 confirmed ESP32-D0WDQ6-V3 revision 3.1,
+MAC a0:dd:6c:79:56:74 and 4 MB SPI flash through the bootloader. Settings-only
+flashing wrote 24,576 bytes at 0x190000. Native IDF full flashing and the
+1,450,320-byte merged public image at zero both passed hash verification.
+Independent verify-flash confirmed the firmware/partition table and unchanged
+config after each firmware write. Boot joined Wi-Fi at 192.168.1.128 and
+reported ESP32-CAM02, auto-off enabled/20 minutes, matching local TOML.
+Neither credentials nor raw NVS contents were printed.
+
+The NVS firmware passed HTTP/1.0 and HTTP/1.1 framing (six decoded VGA JPEGs),
+all five resolutions with 30 snapshots and 34 MJPEG frames, and all five RTSP
+resolutions over TCP and UDP (30 decoded frames). Concurrent snapshots, video
+ownership rejection, Stop/standby cleanup and live auto-off controls passed.
+Two real WebRTC connections with browser-style mDNS candidates decoded ten
+VGA JPEGs, concurrent snapshots and reconnect successfully. Internal free heap
+was approximately 47.8 KiB during WebRTC, largest block 45,056 bytes.
+Session-local evidence: /tmp/esp32-cam-nvs-hardware-*-flash.log,
+/tmp/esp32-cam-nvs-hardware-*-verify.log,
+/tmp/esp32-cam-nvs-hardware-runtime-uart.log and
+/tmp/esp32-cam-nvs-{http,camera,rtsp,webrtc}-test.log.
+
+The user subsequently confirmed operation and requested no further testing.
+Restoration after RAM policy edits was not independently measured.
+Missing-config idle behavior, changed Wi-Fi credentials and actual browser
+USB flashing remain untested on hardware. The browser page smoke test and
+esptool merged-image write do not establish browser serial installation.
+No installer was deployed and nothing was pushed.
+For firmware updates, leave ESP Web Tools' explicit Erase device checkbox
+unchecked; whole-chip erasure removes even the separate settings partition.
+
+## Chrome WebRTC ICE correction candidate (2026-10-21)
+
+User reports Chrome connecting then disconnecting. UART twice logs remote
+candidate `unknown`, state 4 (pairing) immediately followed by 8 (connect
+failed), before DTLS/capture. Numeric aiortc candidates had passed. Espressif's
+local_jpeg_stream README documents mDNS candidate incompatibility. Candidate
+source now pins mdns 1.14.0 and resolves browser `.local` host names before
+esp_peer_send_msg. Only candidate address tokens change. Up to four bounded
+two-second queries; failed names are omitted and an offer with no usable
+candidate receives a descriptive HTTP 400. The temporary mDNS service is
+freed before allocating the peer/DTLS connection. No browser privacy flags
+are changed. Build passes at 1,383,392 application bytes (152,608 free).
+Sanitized SDP/parser and worker lifetime tests pass, including lookup-failure
+cleanup; real-device mDNS/Chrome acceptance remains pending.
+`check_webrtc.py --mdns` now publishes real multicast records and sends browser-style SDP.
+No correction firmware uploaded yet. Evidence for original failure:
+/tmp/esp32-cam-mjpeg-fix-runtime-uart.log, around uptime 314/332 seconds.
+
+Correction upload subsequently succeeded after a power-cycle/jumper check:
+replacement MAC a0:dd:6c:79:56:74, complete flash at 115200 baud, independent
+verify-flash match for all 1,383,392 application bytes at 0x10000. UART DHCP
+again reports 192.168.1.128. `check_webrtc.py --mdns` passed two actual
+ICE/DTLS/SCTP connections using three published `.local` names each; UART
+confirms all six resolutions. Ten original VGA JPEGs and two concurrent
+snapshots decoded; competing offers rejected and reconnect/idle cleanup
+passed. Internal heap during streaming: 49,775 then 49,503 bytes free,
+largest block 47,104. After cleanup: 138,611 free, largest 77,824. No camera
+error, brownout or panic observed. Raw HTTP/1.0 and HTTP/1.1 regression also
+passed six VGA JPEGs total plus Stop/boundary/EOF. Evidence:
+/tmp/esp32-cam-mdns-acceptance.log, /tmp/esp32-cam-mdns-runtime-uart.log and
+/tmp/esp32-cam-mdns-http-regression.log. Camera left idle VGA/12, auto-off
+true/20. User requested to hard-refresh /webrtc in Chrome and report video;
+that actual Chrome confirmation remains pending.
+
+A subsequent browser attempt (user identified Chrome) resolved one usable
+mDNS address, completed ICE/DTLS/SCTP and opened data channel stream ID 1.
+Status reported 4.55 acknowledged frames/s, no camera error and approximately
+48,655 internal bytes free. Total frames_sent advanced from 16 to 104 before
+the remote peer closed DTLS; cleanup returned standby/error=0 and internal
+heap 138,195 bytes free. The viewer ACKs complete frames after image decode
+and canvas drawing, so this establishes the browser data/decode path. Visual
+confirmation from the user is still pending. A second mDNS candidate timed
+out, but the usable candidate allowed the connection; no browser privacy
+flags were changed. Evidence remains in the same UART log around 74–104 s.
+User subsequently confirmed **Live video works** in Chrome after the
+hard-refresh/retry. Actual Chrome playback acceptance is now passed,
+superseding the pending visual-confirmation notes above. MJPEG/VLC and
+RTSP/VLC were also explicitly confirmed by the user before this correction;
+the correction's raw HTTP regression passed afterward. Full-duration
+hardware auto-off remains untested.
+
+## VLC MJPEG compatibility candidate (2026-10-21)
+
+Snap VLC 3.0.24 successfully decoded RTSP with Live555. Direct MJPEG failed:
+its modern HTTP access fell back to a GET using HTTP/1.0, but the ESP-IDF
+response still used Transfer-Encoding: chunked. Wire inspection showed
+chunk lengths preceding the multipart boundary and JPEG bytes; VLC chose
+the MPEG-PS demuxer and never decoded an image. Forcing the MJPEG demuxer
+alone also failed. A host relay removing only HTTP chunk framing allowed
+the same VLC to auto-select MJPEG and decode a picture. Evidence under
+/tmp/esp32-cam-snap-vlc-mjpeg*.log; RTSP evidence at
+/tmp/esp32-cam-snap-vlc-rtsp.log (session-local).
+
+Candidate source uses the public httpd_send API with checked partial writes
+for a close-delimited multipart response. No Transfer-Encoding or overall
+Content-Length is sent. Connection: close plus explicit session closure
+delimits Stop/timeout; part Content-Length and boundaries are retained.
+Headers wait until first capture succeeds so initial camera failure still
+returns HTTP 500. Snapshot/page responses retain normal SDK framing.
+Actual IDF build and full host suite pass; application size 1,340,272 bytes.
+New host tests exercise partial, zero, negative and oversize send results.
+Upload and direct-device VLC/browser regression remain pending. After flash,
+run tools/check_http_stream.py for both HTTP versions, JPEGs and Stop/EOF,
+then tools/check_camera.py and the Snap VLC dummy-output playback check.
+
+Upload and direct-device verification subsequently passed on replacement
+MAC a0:dd:6c:79:56:74. Complete flash verified all image writes/content;
+independent verify-flash matched all 1,340,272 application bytes. UART DHCP
+again reported 192.168.1.128. `check_http_stream.py` passed HTTP/1.0 and
+HTTP/1.1: three original VGA JPEGs each, no Transfer-Encoding, correct Stop
+boundary and socket EOF, healthy standby after each. Snap VLC 3.0.24 direct
+playback now auto-selects `mjpeg`, starts the MJPG decoder and logs
+`Received first picture` followed by continued frame processing. Its modern
+HTTP module still reports a connection failure before successful HTTP/1.0
+fallback; playback proceeds. The bounded 18-second CLI probe ended through
+the deliberate timeout; camera returned to standby with error=0. Evidence:
+/tmp/esp32-cam-mjpeg-fix-http-versions.log and
+/tmp/esp32-cam-mjpeg-fix-snap-vlc.log. No brownout/panic was logged during
+this boot and these checks.
+Full HTTP regression on the same firmware also passed all five resolutions:
+30 original snapshots and 79 original MJPEG frames decoded, including
+simultaneous snapshots, countdown and cleanup. Final state restored VGA/12,
+standby, Wi-Fi modem sleep and camera_error_code=0. Evidence:
+/tmp/esp32-cam-mjpeg-fix-http-regression.log. Actual graphical browser/VLC
+presentation was not inspected by the agent; VLC decoding and HTTP payloads
+were verified with dummy video output and independent JPEG decoding.
+
+## WebRTC candidate (2026-10-21)
+
+Branch `webrtc` adds direct JPEG over an ordered WebRTC data channel using
+`esp_peer` 1.5.7 and `esp_libsrtp` 1.0.0. Actual ESP32 build passes at
+1,340,544 application bytes (195,456 bytes free). Sanitized chunk protocol
+and production worker lifecycle tests pass with a mocked peer API, including
+competing ownership, WOULD_BLOCK retry, snapshots, Stop and shortened
+auto-off. Browser signaling, reassembly/rendering and cleanup tests pass.
+Existing camera/state/config/browser and independent FFmpeg RTSP host tests
+also pass after extracting their shared SDK fakes.
+
+Hardware upload, ICE/DTLS/SCTP interoperability, browser playback and internal
+heap acceptance are pending. After a full verified flash and manual reset:
+
+1. Read the DHCP URL from UART; keep other camera viewers closed.
+2. Run `build/webrtc-test-env/bin/python tools/check_webrtc.py http://<IP>`
+   (or another environment containing aiortc and Pillow). It requires two
+   real peer connections, five decoded original JPEGs each, simultaneous
+   snapshots, rejection of a competing offer and idle cleanup without a
+   camera error. Record internal free/largest heap during streaming.
+3. Open `/webrtc` in a real browser, test Start/Stop/reconnect, then Stop
+   from the main page. Check canvas images and device UART for errors.
+4. Repeat `tools/check_camera.py` and `tools/check_rtsp.py` with their
+   documented arguments to check the existing protocols after peer cleanup.
+5. Test on-device auto-off expiry; host shortened-deadline coverage alone
+   does not establish a full-duration hardware result.
+
+Upload subsequently succeeded on MAC a0:dd:6c:79:56:74 with complete flash
+hash verification and an independent digest match of 1,340,544 application
+bytes. First runtime attempt repeatedly reports `Brownout detector was
+triggered` during Wi-Fi PHY initialization, before DHCP and before any
+WebRTC peer is created. No live WebRTC/RAM result can be claimed. A power
+cycle and stable 5V supply check were requested; cause remains unisolated.
+UART evidence: /tmp/esp32-cam-webrtc-runtime-uart.log (session-local).
+
+Subsequently the board obtained DHCP 192.168.1.128 and completed hardware
+acceptance without another brownout during the checks. `check_webrtc.py`
+passed two independent aiortc ICE/DTLS/SCTP connections, ten original VGA
+JPEGs (five each), two simultaneous snapshots, rejection of a competing
+offer, reconnect and idle cleanup with camera_error_code=0. UART records
+successful DTLS handshakes and SCTP data-channel opens. Streaming internal
+free heap was 51,135 then 51,115 bytes, largest block 47,104 bytes; after
+cleanup internal free heap recovered to approximately 139,599 bytes.
+Evidence: /tmp/esp32-cam-webrtc-acceptance.log.
+
+HTTP regression passed all five resolutions with 30 decoded snapshots and
+41 decoded MJPEG frames, including concurrency, countdown and cleanup.
+RTSP regression passed all five resolutions over TCP and UDP (30 decoded
+frames total), four simultaneous VGA snapshots, competing MJPEG rejection,
+measured FPS, HTTP Stop and live auto-off policy validation. Settings restored
+to VGA/12 and auto-off true/20. Evidence: the -http-regression.log and
+-rtsp-regression.log companions under /tmp/esp32-cam-webrtc. Actual browser
+playback and full-duration hardware auto-off expiry remain pending. The
+earlier brownout cause remains unisolated; the user reports running after
+the power-cycle/supply-check request.
+
 ## Immediate stream failure investigation (2026-10-20)
 
 Reproduced on running ESP32-CAM02 at 192.168.1.127 with UART capture and
@@ -371,3 +594,12 @@ Live-policy/RTSP candidate flashed to replacement MAC a0:dd:6c:79:56:74
 at 115200 baud. Complete IDF flash passed write hashes; independent verify
 matched all 1,071,712 application bytes at 0x10000. Board left in bootloader.
 GPIO0 removal/reset and FFmpeg plus HTTP regression checks are pending.
+
+
+2026-10-21 user acceptance: the user confirmed the installation works and
+requested no further tests. No additional hardware tests were performed.
+Restoration of NVS defaults after the temporary RAM policy change was not
+independently measured; actual browser USB flashing remains unverified.
+README now leads with browser installation and separates VS Code/ESP-IDF use.
+Project-owned source files carry the requested Axel Richter SPDX header;
+third-party dependencies are excluded. Housing CAD data belongs in cad/housing/.

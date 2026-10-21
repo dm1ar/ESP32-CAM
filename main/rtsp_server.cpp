@@ -1,3 +1,10 @@
+/*
+ * ESP32-CAM raximax
+ *
+ * SPDX-FileCopyrightText: 2026 Axel Richter
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 #include "rtsp_server.hpp"
 #include "rtsp_protocol.hpp"
 #include <algorithm>
@@ -50,8 +57,8 @@ private:
 
 class RtspSession final {
 public:
-    RtspSession(int client, sockaddr_in peer, FrameService& frames, SharedState& state) noexcept
-        : client_{client}, peer_{peer}, frames_{frames}, state_{state} {}
+    RtspSession(int client, sockaddr_in peer, FrameService& frames, SharedState& state, const char* nodeName) noexcept
+        : client_{client}, peer_{peer}, frames_{frames}, state_{state}, nodeName_{nodeName} {}
     ~RtspSession() noexcept { end(false); }
     RtspSession(const RtspSession&) = delete;
     RtspSession& operator=(const RtspSession&) = delete;
@@ -70,6 +77,7 @@ private:
     sockaddr_in peer_{};
     FrameService& frames_;
     SharedState& state_;
+    const char* nodeName_;
     Socket rtp_{};
     Socket rtcp_{};
     rtsp::Transport transport_{};
@@ -171,7 +179,7 @@ bool RtspSession::handle(const rtsp::Request& request) noexcept
         const auto length = std::snprintf(sdp.data(), sdp.size(),
             "v=0\r\no=- %" PRIu32 " 1 IN IP4 0.0.0.0\r\ns=%s\r\nc=IN IP4 0.0.0.0\r\n"
             "t=0 0\r\na=control:*\r\nm=video 0 RTP/AVP 26\r\na=rtpmap:26 JPEG/90000\r\n"
-            "a=framerate:10\r\na=control:trackID=0\r\n", ssrc_, Network::nodeName());
+            "a=framerate:10\r\na=control:trackID=0\r\n", ssrc_, nodeName_);
         if ((length <= 0) || (static_cast<std::size_t>(length) >= sdp.size())) { return false; }
         std::array<char, 160U> header{};
         static_cast<void>(std::snprintf(header.data(), header.size(),
@@ -306,7 +314,7 @@ bool RtspSession::report() noexcept
         ((esp_timer_get_time() - startedUs_) * 9) / 100));
     rtsp::put32(report, 20U, packets_);
     rtsp::put32(report, 24U, octets_);
-    const auto name = std::string_view{Network::nodeName()};
+    const auto name = std::string_view{nodeName_};
     const auto sdesLength = ((11U + name.size() + 3U) / 4U) * 4U;
     report[28U] = 0x81U;
     report[29U] = 202U;
@@ -445,7 +453,7 @@ void RtspServer::run() noexcept
         socklen_t size{sizeof(peer)};
         const auto client = accept(listener_, reinterpret_cast<sockaddr*>(&peer), &size);
         if (client < 0) { vTaskDelay(pdMS_TO_TICKS(100U)); continue; }
-        RtspSession session{client, peer, frames_, state_};
+        RtspSession session{client, peer, frames_, state_, nodeName_};
         session.run();
     }
 }

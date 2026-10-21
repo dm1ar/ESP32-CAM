@@ -6,4 +6,9 @@ export IDF_TOOLS_PATH="${IDF_TOOLS_PATH:-/home/rax/.espressif}"
 export IDF_PYTHON_ENV_PATH="${IDF_PYTHON_ENV_PATH:-/home/rax/.espressif/python_env/idf6.1_py3.12_env}"
 source "$IDF_PATH/export.sh" >&2
 cd "$project_dir"
+case "${1:-}" in
+    config) shift; exec "$IDF_PYTHON_ENV_PATH/bin/python" tools/wifi_config.py "$@" ;;
+    flash-config) shift; exec "$IDF_PYTHON_ENV_PATH/bin/python" tools/flash_config.py "$@" ;;
+    web-flash) shift; exec "$IDF_PYTHON_ENV_PATH/bin/python" tools/prepare_web_flash.py "$@" ;;
+esac
 exec "$IDF_PYTHON_ENV_PATH/bin/python" "$IDF_PATH/tools/idf.py" "$@"
