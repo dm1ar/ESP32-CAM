@@ -29,6 +29,7 @@ void Network::logUrl() const noexcept
     if ((station_ != nullptr) && (esp_netif_get_ip_info(station_, &info) == ESP_OK)
         && (info.ip.addr != 0U)) {
         ESP_LOGI(tag, "Node %s, browser URL: http://" IPSTR "/", nodeName(), IP2STR(&info.ip));
+        ESP_LOGI(tag, "RTSP stream: rtsp://" IPSTR ":554/stream", IP2STR(&info.ip));
         ESP_LOGI(tag, "MJPEG stream: http://" IPSTR ":81/stream", IP2STR(&info.ip));
     }
 }

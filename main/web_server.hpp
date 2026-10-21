@@ -30,6 +30,7 @@ private:
     [[nodiscard]] esp_err_t health(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t status(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t control(httpd_req_t* request) noexcept;
+    [[nodiscard]] esp_err_t autoOff(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t stop(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t stream(httpd_req_t* request) noexcept;
     [[nodiscard]] esp_err_t sendFrame(httpd_req_t* request, RateMeter& meter) noexcept;

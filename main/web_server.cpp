@@ -45,6 +45,7 @@ public:
     }
     ~StreamSession() noexcept
     {
+        if (result_ != ESP_OK) { return; } // A rejected client does not own cleanup.
         const auto result = frames_.finish(failed_);
         if (result != ESP_OK) {
             ESP_LOGE(tag, "Camera standby failed: %s", esp_err_to_name(result));
@@ -118,6 +119,28 @@ esp_err_t WebServer::control(httpd_req_t* request) noexcept
     if (!parseControl(std::string_view{body.data(), received}, settings) || !state_.select(settings)) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                   "Use one listed resolution and JPEG quality 0-63");
+    }
+    return json(request, "{\"accepted\":true}");
+}
+
+esp_err_t WebServer::autoOff(httpd_req_t* request) noexcept
+{
+    std::array<char, 128U> body{};
+    if ((request->content_len == 0U) || (request->content_len >= body.size())) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Invalid auto-off body");
+    }
+    std::size_t received{0U};
+    while (received < request->content_len) {
+        const auto count = httpd_req_recv(request, body.data() + received, request->content_len - received);
+        if ((count <= 0) || (static_cast<std::size_t>(count) > request->content_len - received)) {
+            return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "Incomplete auto-off body");
+        }
+        received += static_cast<std::size_t>(count);
+    }
+    StreamPolicy policy{};
+    if (!parseAutoOff({body.data(), received}, policy) || !state_.setPolicy(policy, esp_timer_get_time())) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                  "Use auto_off=true/false and auto_off_minutes=5..120");
     }
     return json(request, "{\"accepted\":true}");
 }
@@ -226,7 +249,8 @@ esp_err_t WebServer::stream(httpd_req_t* request) noexcept
     StreamSession session{frames_, state_};
     auto result = session.result();
     if (result != ESP_OK) {
-        return result;
+        static_cast<void>(httpd_resp_set_status(request, "503 Service Unavailable"));
+        return httpd_resp_sendstr(request, "A video session is already active, or startup failed");
     }
     result = responseHeaders(request, "multipart/x-mixed-replace;boundary=esp32camframe");
     RateMeter meter{};
@@ -281,7 +305,7 @@ esp_err_t WebServer::start() noexcept
     if (result != ESP_OK) { return result; }
 
     // Value-initialize every SDK structure so future optional fields stay zero.
-    std::array<httpd_uri_t, 7U> routes{};
+    std::array<httpd_uri_t, 8U> routes{};
     routes[0U].uri = "/";
     routes[0U].handler = &bridge<&WebServer::index>;
     routes[1U].uri = "/health";
@@ -292,12 +316,14 @@ esp_err_t WebServer::start() noexcept
     routes[3U].handler = &bridge<&WebServer::control>;
     routes[4U].uri = "/stop";
     routes[4U].handler = &bridge<&WebServer::stop>;
+    routes[7U].uri = "/auto-off";
+    routes[7U].handler = &bridge<&WebServer::autoOff>;
     routes[6U].uri = "/capture";
     routes[6U].handler = &bridge<&WebServer::capture>;
     routes[5U].uri = "/stream";
     routes[5U].handler = &bridge<&WebServer::stream>;
     for (std::size_t i{0U}; i < routes.size(); ++i) {
-        routes[i].method = ((i == 3U) || (i == 4U)) ? HTTP_POST : HTTP_GET;
+        routes[i].method = ((i == 3U) || (i == 4U) || (i == 7U)) ? HTTP_POST : HTTP_GET;
         routes[i].user_ctx = this;
         if (i == 5U) {
             // A blocking MJPEG handler must never run on the page/status task.

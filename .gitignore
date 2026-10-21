@@ -4,3 +4,5 @@
 /sdkconfig.old
 __pycache__/
 /wifi.toml
+
+/cam.log

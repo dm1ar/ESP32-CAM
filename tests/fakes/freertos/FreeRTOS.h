@@ -8,4 +8,6 @@ using portMUX_TYPE = std::mutex;
 #define portENTER_CRITICAL(mutex) (mutex)->lock()
 #define portEXIT_CRITICAL(mutex) (mutex)->unlock()
 #define pdMS_TO_TICKS(milliseconds) (milliseconds)
+inline constexpr int pdTRUE{1}, pdFALSE{0}, pdPASS{1};
+inline constexpr std::uint32_t portMAX_DELAY{0xFFFFFFFFU};
 #endif

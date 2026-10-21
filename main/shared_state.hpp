@@ -23,13 +23,14 @@ private:
 // goes through this object; no caller can retain a reference to mutable state.
 class SharedState final {
 public:
-    // Production receives the compiled TOML policy once at startup. Keeping
-    // it immutable through the public API prevents controls extending a timer.
+    // Compiled TOML defaults at boot; browser policy updates are RAM-only.
+    // Camera settings never change the deadline; policy uses original start.
     explicit SharedState(StreamPolicy policy = {}) noexcept { data_.policy = policy; }
     SharedState(const SharedState&) = delete;
     SharedState& operator=(const SharedState&) = delete;
     [[nodiscard]] StreamSnapshot snapshot() const noexcept;
     [[nodiscard]] bool select(const CameraSettings& settings) noexcept;
+    [[nodiscard]] bool setPolicy(StreamPolicy policy, std::int64_t now) noexcept;
     void requestStop() noexcept;
     [[nodiscard]] bool shouldStop(std::int64_t now) noexcept;
     void begin(std::int64_t now) noexcept;

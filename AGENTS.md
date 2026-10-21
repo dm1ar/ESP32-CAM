@@ -266,3 +266,86 @@ VGA/12, standby and no camera error. Runtime log:
 running with auto-off enabled at 20 minutes. Full-duration expiry and actual
 openHAB integration remain untested. Snapshot hardware acceptance is now
 passed, superseding the pending-upload/runtime notes above.
+
+
+RTSP implementation (2026-10-20, branch rtsp): adds
+rtsp://<DHCP-address>:554/stream using baseline JPEG over RFC 2435 RTP, UDP
+unicast (camera ports 5004/5005) or interleaved TCP. OPTIONS/DESCRIBE/SETUP/
+PLAY/PAUSE/TEARDOWN/GET_PARAMETER and RTCP SR/SDES/BYE are implemented.
+One RTSP control client at a time; one active video owner across MJPEG/RTSP.
+Worker begin atomically rejects competing video claims, and rejected HTTP
+clients do not clean up the existing owner. Snapshots remain available.
+Existing auto-off and HTTP Stop apply; PAUSE/resumed PLAY starts a new interval.
+Fixed request/packet buffers, strict range checks, standard JPEG Huffman
+table fingerprints, explicit quantizers, at most 10 capture requests/s.
+Status counts actual complete frame sends (UDP delivery is not guaranteed).
+Host sanitizers, parser/packetizer tests, and production server/worker POSIX
+socket tests with independent FFmpeg TCP/UDP decoding pass, including
+pause/resume, reconnect, busy ownership, snapshots, Stop and shortened
+auto-off. ESP-IDF build passes (31% app partition free). No dependencies or
+credentials changed. Hardware RTSP acceptance/upload remain pending;
+tools/check_rtsp.py tests all resolutions and concurrency with actual FFmpeg,
+then tools/check_camera.py repeats HTTP regression. This supersedes earlier
+notes saying RTSP is not implemented. No authentication or multicast is added.
+
+
+RTSP upload: replacement MAC a0:dd:6c:79:56:74 confirmed through ROM.
+Complete IDF flash at 115200 baud passed write hash verification; separate
+verify-flash matched all 1,067,456 application bytes at 0x10000. Board left
+in bootloader, manual GPIO0 removal/reset required. RTSP hardware acceptance
+and HTTP snapshot/MJPEG regression remain pending.
+
+
+First RTSP hardware check: DHCP 192.168.1.128 and QVGA TCP passed independent
+FFmpeg decoding (3 frames). The following UDP SETUP returned HTTP-style
+RTSP 500 before capture; acceptance stopped and cleanup restored standby.
+SDK inspection shows each HTTP server consumes three infrastructure sockets
+(listener/control/message), so default CONFIG_LWIP_MAX_SOCKETS=10 cannot
+cover both servers, HTTP clients, RTSP control and UDP RTP/RTCP. The candidate
+raises the budget to 20 (up to 16 configured sockets plus headroom) and adds
+UDP allocation/configuration errno logging. This candidate requires another
+flash; UDP and full hardware acceptance are not yet passed.
+
+
+Socket-budget candidate upload: CONFIG_LWIP_MAX_SOCKETS=20 is compiled.
+Manual boot connection to replacement MAC a0:dd:6c:79:56:74 succeeded after
+CuteCom released the port and the user reset the board. Full IDF flash at
+115200 baud passed write hashes; independent verify-flash matched 1,067,792
+application bytes at 0x10000. Board remains in download mode awaiting
+GPIO0 removal/reset for repeated RTSP UDP/TCP and HTTP acceptance.
+
+
+Socket-budget hardware result: QVGA TCP and UDP each decoded three frames,
+confirming UDP SETUP now succeeds. A later VGA/default-FFmpeg run timed out;
+a bounded-probe TCP run decoded three original VGA frames with no decode
+errors. A direct UDP receiver saw three complete frames/28 packets with no
+sequence gaps before the server closed (camera error 0, RSSI -84 dBm). Full
+acceptance therefore remains failed/incomplete. A new candidate adds bounded
+UDP transient-send retries and fatal errno/poll logging, TCP_NODELAY and SDP
+framerate ceiling. Espressif documents delayed retries for UDP ENOMEM:
+https://docs.espressif.com/projects/esp-idf/en/release-v5.4/esp32/api-guides/lwip.html
+These are candidate remedies, not yet hardware-proven. SDK build passes;
+host socket tests now inject ENOMEM. Another upload/runtime check is needed.
+
+
+2026-10-21 live policy / RTSP correction: browser Auto-off checkbox and
+5–120 minute slider save immediately to POST /auto-off. Runtime policy is
+RAM-only, starts at compiled TOML defaults (true/20 by default), and remains
+anchored to original stream start. Disable removes deadline; enabling or
+shortening past elapsed time stops; policy edits cannot resurrect Stop.
+TOML range is now also 5–120 minutes; credentials are preserved.
+Read /home/rax/Dokumente/cam.log: normal MJPEG socket-close warning 104,
+followed by repeated RTSP connects/disconnects before camera wake. Local
+VLC 3.0.23 configuration explicitly disables Live555 and falls back to
+SAT>IP/RealRTSP, reproducing failure against our host server; --rtsp-tcp is
+not available in this build. Use FFplay or RTSP-enabled VLC to validate.
+The candidate also includes bounded UDP ENOMEM/etc retries, TCP_NODELAY,
+20 sockets and SDP framerate ceiling from the prior investigation. Sanitized
+model/browser/config/RTSP tests including injected ENOMEM pass; SDK build
+passes. New hardware acceptance remains pending. Console cam.log is ignored.
+
+
+Live-policy/RTSP candidate flashed to replacement MAC a0:dd:6c:79:56:74
+at 115200 baud. Complete IDF flash passed write hashes; independent verify
+matched all 1,071,712 application bytes at 0x10000. Board left in bootloader.
+GPIO0 removal/reset and FFmpeg plus HTTP regression checks are pending.

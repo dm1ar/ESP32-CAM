@@ -12,7 +12,7 @@
     button{margin:8px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}
     .controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px;margin:20px 0}
     label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
-    input{max-width:100%;width:150px}p{color:#acbdc9}
+    input{max-width:100%;width:150px}input[type=checkbox]{width:auto}p{color:#acbdc9}
     .telemetry{padding:12px;background:#1b2a35;border-radius:8px;line-height:1.7;font-variant-numeric:tabular-nums}
     #details{font-size:14px;overflow-wrap:anywhere}.hint{font-size:14px}
   </style>
@@ -30,6 +30,12 @@
     <label>JPEG quality <input id="quality" type="range" min="0" max="63" value="12"><output id="qualityValue">12</output></label>
     <button id="apply">Apply settings</button>
   </div>
+  <div class="controls">
+    <label><input id="autoOff" type="checkbox" checked> Auto-off</label>
+    <label>Stop after <input id="autoOffMinutes" type="range" min="5" max="120" step="1" value="20">
+      <output id="autoOffMinutesValue">20</output> min</label>
+  </div>
+  <p class="hint">Auto-off changes save immediately for this boot. Time is measured from the stream start.</p>
   <p class="hint">Lower quality number = better image and more bandwidth. Settings reset to VGA / 12 after reboot.</p>
   <button id="start">Start stream</button><button id="stop">Stop stream</button>
   <p id="status" role="status">Ready — camera in standby</p>
@@ -48,6 +54,10 @@ class LiveCameraPage {
     this.status = document.getElementById('status');
     this.quality = document.getElementById('quality');
     this.resolution = document.getElementById('resolution');
+    this.autoOff = document.getElementById('autoOff');
+    this.autoOffMinutes = document.getElementById('autoOffMinutes');
+    this.policyEditing = false;
+    this.policyBusy = false;
     this.wantStream = false;
     this.awaitingStream = false;
     this.editing = false;
@@ -59,6 +69,15 @@ class LiveCameraPage {
       document.getElementById('qualityValue').value = this.quality.value;
       this.editing = true;
     };
+    this.autoOff.onchange = () => {
+      this.policyEditing = true;
+      void this.savePolicy();
+    };
+    this.autoOffMinutes.oninput = () => {
+      document.getElementById('autoOffMinutesValue').value = this.autoOffMinutes.value;
+      this.policyEditing = true;
+    };
+    this.autoOffMinutes.onchange = () => { void this.savePolicy(); };
     this.resolution.onchange = () => { this.editing = true; };
     document.getElementById('start').onclick = () => this.start();
     document.getElementById('stop').onclick = () => this.stop();
@@ -162,6 +181,33 @@ class LiveCameraPage {
     }
   }
 
+  async savePolicy() {
+    if (this.policyBusy) { return; }
+    this.policyBusy = true;
+    this.autoOff.disabled = true;
+    this.autoOffMinutes.disabled = true;
+    // Invalidate a poll started before this command, so stale policy cannot
+    // replace accepted controls after the POST completes.
+    ++this.refreshVersion;
+    clearTimeout(this.timer);
+    try {
+      await this.post('/auto-off', new URLSearchParams({
+        auto_off: String(this.autoOff.checked),
+        auto_off_minutes: this.autoOffMinutes.value
+      }));
+      this.policyEditing = false;
+      this.status.textContent = 'Auto-off settings saved';
+    } catch (error) {
+      this.policyEditing = true;
+      this.status.textContent = 'Could not save auto-off: ' + error.message;
+    } finally {
+      this.policyBusy = false;
+      this.autoOff.disabled = false;
+      this.autoOffMinutes.disabled = false;
+      void this.refresh();
+    }
+  }
+
   render(sample) {
     document.getElementById('nodeName').textContent = `${sample.node_name} Live`;
     document.title = `${sample.node_name} Live`;
@@ -178,6 +224,11 @@ class LiveCameraPage {
       this.resolution.value = sample.resolution;
       this.quality.value = sample.jpeg_quality;
       document.getElementById('qualityValue').value = this.quality.value;
+    }
+    if (!this.policyEditing && !this.policyBusy) {
+      this.autoOff.checked = sample.auto_off;
+      this.autoOffMinutes.value = sample.auto_off_minutes;
+      document.getElementById('autoOffMinutesValue').value = this.autoOffMinutes.value;
     }
     document.getElementById('telemetry').textContent =
       `${sample.node_name} | ${sample.sensor} | ${sample.width} × ${sample.height} ${sample.format} | ` +

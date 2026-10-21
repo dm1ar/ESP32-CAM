@@ -78,11 +78,11 @@ the toolchain, SDK or relevant boundary code changes.
 
 | ID | Decision and reason | Containment and evidence |
 | --- | --- | --- |
-| D01 | GNU++26 is required by the task although MISRA C++:2023 covers C++17. Defaulted equality is a C++20 feature. | Exact compiler mode in `main/CMakeLists.txt`; build metadata verifies all first-party sources. Most code uses the C++17 subset. Formal conformance requires separate assessment. |
-| D02 | ESP-IDF uses non-owning pointers, `void*` callback contexts, varargs logging/formatting and byte-to-`char` socket buffers. | Casts are confined to SDK adapters; callbacks check null; pointer lifetime is documented; bounded `snprintf` results and send lengths are checked. `reinterpret_cast` is limited to reading JPEG object bytes. |
+| D01 | GNU++26 is required by the task although MISRA C++:2023 covers C++17. Defaulted equality, std::span and string_view::starts_with use C++20 features. | Exact compiler mode in `main/CMakeLists.txt`; build metadata verifies all first-party sources. Most code uses the C++17 subset. Formal conformance requires separate assessment. |
+| D02 | ESP-IDF uses non-owning pointers, `void*` callback contexts, varargs logging/formatting and byte-to-`char` socket buffers. | Casts are confined to SDK adapters; callbacks check null; pointer lifetime is documented; bounded `snprintf` results and send lengths are checked. `reinterpret_cast` is confined to JPEG/protocol byte views and the POSIX/lwIP sockaddr adapter boundary. |
 | D03 | Embedded HTML uses GNU assembler symbol names and linker-defined start/end addresses. Subtracting these symbols is an SDK linker convention outside portable C++ array provenance. | Only `web_server.cpp` uses the symbols; `EMBED_TXTFILES` supplies a contiguous NUL-terminated payload. No general inline assembly is used. |
 | D04 | SDK macros and headers use C constructs/GNU extensions, including `#include_next` and flexible arrays. | Firmware enables strict conversion/sign/shadow/format warnings and `-Werror`, but not `-Wpedantic`, which rejects SDK headers. Host tests add `-Wpedantic`. SDK default warning exclusions remain inherited. This is not a MISRA checker. |
-| D05 | Wi-Fi, HTTP, FreeRTOS and camera drivers allocate memory internally; an MJPEG server needs driver-managed frame buffers. | No direct application heap allocation; static event group storage; two bounded camera buffers; failed startup is fatal; scoped stream/frame guards guarantee application cleanup attempts. Allocation inside upstream code is not claimed MISRA-compliant. |
+| D05 | Wi-Fi, HTTP, FreeRTOS and camera drivers allocate memory internally; an MJPEG server needs driver-managed frame buffers. | Except for the explicit D09 PSRAM buffers, no direct application heap allocation; static event group storage; two bounded camera buffers; failed startup is fatal; scoped stream/frame guards guarantee application cleanup attempts. Allocation inside upstream code is not claimed MISRA-compliant. |
 | D06 | The SDK requires C-linkage `app_main`, global driver APIs and process-lifetime callbacks. Application members are not shut down on normal `app_main` return. | One static `Application` owns all callback state; reset ends its lifetime. Boot failures fail fast. Wi-Fi acquisition intentionally waits indefinitely in timed 30-second intervals and logs progress. |
 | D07 | Small bounded `memcpy` operations transfer generated credentials into SDK byte arrays. A maximum-length SSID/PSK may occupy the full array without a trailing NUL. | TOML validation bounds input; compile-time assertions check destination capacity; credentials are never formatted as C strings or printed. |
 | D09 | Three JPEG buffers allocate 512 KiB each from PSRAM at startup using `heap_caps_malloc`, with RAII destruction via `heap_caps_free`. | One cache and independent stream/snapshot copies; bounded copy with null/length checks, no per-frame allocation, no driver lease retained during send. Failure stops startup or returns HTTP 500. Host tests cover copy lifetime, reuse, failure and oversize rejection. |
@@ -92,7 +92,10 @@ the toolchain, SDK or relevant boundary code changes.
 
 Run `bash tools/test.sh` for production parser/rate/state/camera tests with
 AddressSanitizer and UndefinedBehaviorSanitizer, a host mutex concurrency
-exercise, and browser controller tests. Camera/GPIO and RTOS functions are
+exercise, browser controller tests, RTSP parser/packetizer corruption tests, and
+production RTSP socket/worker tests decoded independently by FFmpeg. The
+RTSP host tests require Pillow and FFmpeg and use TCP port 8554 plus UDP
+5004/5005. Camera/GPIO and RTOS functions are
 host fakes here; they test application contracts rather than electrical or
 real-time behavior. Run `bash tools/idf.sh build` for the actual ESP32 ABI,
 SDK headers, format checking, linker and partition-size checks.
@@ -111,3 +114,11 @@ future MISRA compliance claim.
 - [MISRA C publications](https://misra.org.uk/misra-c/)
 - [ESP-IDF v6.1 C++ language, linkage and limitations](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-guides/cplusplus.html)
 - [ESP-IDF v6.1 release](https://github.com/espressif/esp-idf/releases/tag/v6.1)
+
+RTSP unsigned RTP sequence, timestamp and packet/octet counters intentionally
+wrap according to their wire widths. Standard JPEG Huffman tables are checked
+with structural bounds and FNV-1a fingerprints; this is a format compatibility
+check for sensor output, not a cryptographic integrity guarantee. RTSP sockets
+are scoped resources, while startup listeners/tasks have application lifetime.
+No allocation occurs per RTSP packet/request. Host socket adapters alone
+ignore POSIX SIGPIPE to match lwIP's send-error behavior.

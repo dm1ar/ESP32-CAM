@@ -6,7 +6,7 @@
 #include "freertos/semphr.h"
 
 namespace cam {
-// Two synchronous callers (page and stream HTTP tasks), one camera owner.
+// Page HTTP, stream HTTP and RTSP callers share one camera owner.
 // Each queued stack request stays alive until the worker signals completion.
 class FrameService final {
 public:

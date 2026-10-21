@@ -63,8 +63,16 @@ void FrameService::run() noexcept
             continue;
         }
         if (request->operation == Operation::begin) {
-            state_.begin(esp_timer_get_time());
-            request->result = Network::setStreamingPower(true);
+            if (state_.snapshot().streaming) {
+                request->result = ESP_ERR_INVALID_STATE;
+            } else {
+                state_.begin(esp_timer_get_time());
+                request->result = Network::setStreamingPower(true);
+                if (request->result != ESP_OK) {
+                    state_.cameraFailed(request->result);
+                    state_.finish(true);
+                }
+            }
         } else if ((request->operation == Operation::finish)
                    || (request->operation == Operation::finishFailed)) {
             static_cast<void>(state_.shouldStop(esp_timer_get_time()));

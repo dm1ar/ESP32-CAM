@@ -14,3 +14,7 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 # Keep the maintained SCCB master backend; the legacy backend did not resolve
 # the observed sensor-write failures during the hardware comparison.
 CONFIG_SCCB_HARDWARE_I2C_DRIVER_NEW=y
+
+# Two HTTP servers use six infrastructure sockets; allow RTSP control,
+# RTP/RTCP, HTTP clients and network-service headroom.
+CONFIG_LWIP_MAX_SOCKETS=20

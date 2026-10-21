@@ -39,8 +39,8 @@ def generate(source: Path, destination: Path) -> None:
         raise ValueError("Set [wifi] auto_off to a TOML boolean (true or false).")
     # Seconds are exposed as uint32_t in JSON. Reject booleans, fractions,
     # zero and overflow before producing C++ constants, even when disabled.
-    if type(auto_off_minutes) is not int or not 1 <= auto_off_minutes <= 0xFFFFFFFF // 60:
-        raise ValueError("Set [wifi] auto_off_minutes to an integer from 1 to 71582788.")
+    if type(auto_off_minutes) is not int or not 5 <= auto_off_minutes <= 120:
+        raise ValueError("Set [wifi] auto_off_minutes to an integer from 5 to 120.")
 
     def array(name: str, value: bytes) -> str:
         return f"static const unsigned char {name}[] = {{{','.join(map(str, value))},0}};\n"

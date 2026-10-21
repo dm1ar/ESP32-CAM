@@ -8,11 +8,12 @@ const html = fs.readFileSync(new URL('../main/index.html', import.meta.url), 'ut
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const elements = new Map();
 for (const id of ['camera', 'status', 'quality', 'resolution', 'qualityValue', 'nodeName', 'autoOffHint',
-                  'start', 'stop', 'apply', 'telemetry', 'details']) {
+                  'autoOff', 'autoOffMinutes', 'autoOffMinutesValue', 'start', 'stop', 'apply', 'telemetry', 'details']) {
   elements.set(id, {
     value: id === 'quality' ? '12' : 'VGA',
     textContent: '',
     disabled: false,
+    checked: true,
     removeAttribute(name) { delete this[name]; }
   });
 }
@@ -51,6 +52,21 @@ assert.match(elements.get('telemetry').textContent, /7\.5 sent fps/);
 assert.match(elements.get('details').textContent, /ESP-IDF v6\.1/);
 assert.equal(elements.get('nodeName').textContent, 'ESP32-CAM02 Live');
 assert.equal(context.document.title, 'ESP32-CAM02 Live');
+
+assert.match(html, /id="autoOffMinutes" type="range" min="5" max="120" step="1" value="20"/);
+assert.equal(elements.get('autoOff').checked, true);
+assert.equal(Number(elements.get('autoOffMinutes').value), 20);
+elements.get('autoOffMinutes').value = '120';
+elements.get('autoOffMinutes').oninput();
+page.render(sample);
+assert.equal(elements.get('autoOffMinutes').value, '120', 'polling preserves slider draft');
+elements.get('autoOff').checked = false;
+await page.savePolicy();
+const policy = requests.find(request => request.path === '/auto-off');
+assert.equal(policy.options.body.toString(), 'auto_off=false&auto_off_minutes=120');
+assert.equal(page.policyBusy, false);
+assert.equal(elements.get('autoOff').disabled, false);
+await new Promise(resolve => setImmediate(resolve));
 
 page.start();
 await new Promise(resolve => setImmediate(resolve));
@@ -131,6 +147,13 @@ assert.equal([...timers.values()][0].delay, 5000);
 await page.apply();
 assert.match(elements.get('status').textContent, /Could not apply settings/);
 assert.equal(page.commandBusy, false, 'failure releases command buttons');
+elements.get('autoOffMinutes').value = '5';
+await page.savePolicy();
+assert.match(elements.get('status').textContent, /Could not save auto-off/);
+assert.equal(page.policyEditing, true);
+assert.equal(elements.get('autoOffMinutes').disabled, false);
+page.render(sample);
+assert.equal(elements.get('autoOffMinutes').value, '5', 'failed policy save preserves draft');
 assert.equal(elements.get('start').disabled, false);
 page.render({ ...sample, camera_state: 'error', camera_error_code: 0x20004 });
 assert.match(elements.get('status').textContent, /Camera failed \(code 131076\)/);

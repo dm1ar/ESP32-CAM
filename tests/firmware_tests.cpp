@@ -238,6 +238,44 @@ void testCamera()
     require(camera.prepare({}) == ESP_OK, "next browser wake can recover");
     require(camera.sleep() == ESP_OK, "final camera cleanup");
 }
+void testLivePolicy()
+{
+    cam::StreamPolicy policy{};
+    for (const auto* body : {"auto_off=true&auto_off_minutes=5", "auto_off_minutes=120&auto_off=false"}) {
+        require(cam::parseAutoOff(body, policy), "valid browser policy form");
+    }
+    constexpr std::array invalid{
+        "", "auto_off=true", "auto_off=1&auto_off_minutes=20", "auto_off=false&auto_off_minutes=4",
+        "auto_off=true&auto_off_minutes=121", "auto_off=true&auto_off_minutes=-1",
+        "auto_off=true&auto_off_minutes=20.0", "auto_off=true&auto_off_minutes=999999999",
+        "auto_off=true&auto_off_minutes=20&x=y", "auto_off=true&auto_off_minutes=20&",
+        "auto_off=true&auto_off=true&auto_off_minutes=20"};
+    for (const auto* body : invalid) {
+        const auto before = policy;
+        require(!cam::parseAutoOff(body, policy), "reject malformed browser policy");
+        require(policy.autoOff == before.autoOff && policy.limitSeconds == before.limitSeconds,
+                "invalid policy does not partially apply");
+    }
+    cam::SharedState state{};
+    state.begin(100);
+    require(state.setPolicy({false, 300U}, 100'000'100), "disable during stream");
+    require(!state.shouldStop(400'000'100) && state.snapshot().streamDeadlineUs == 0,
+            "disabled policy has no deadline");
+    require(state.setPolicy({true, 1200U}, 400'000'100), "enable during stream");
+    require(state.snapshot().streamDeadlineUs == 1'200'000'100, "enabling anchors original stream start");
+    require(state.setPolicy({true, 300U}, 400'000'100), "shorter policy accepted");
+    require(state.shouldStop(400'000'100) && state.snapshot().streamTimedOut,
+            "already elapsed new duration stops immediately");
+    require(state.setPolicy({false, 7200U}, 400'000'101) && state.shouldStop(400'000'101),
+            "policy edit cannot revive stopped stream");
+    require(!state.setPolicy({true, 299U}, 0) && !state.setPolicy({true, 7201U}, 0),
+            "policy API enforces slider bounds");
+    state.finish(false);
+    state.begin(500'000'100);
+    require(!state.shouldStop(900'000'100), "new stream honors disabled policy");
+    require(state.setPolicy({true, 300U}, 900'000'100) && state.shouldStop(900'000'100),
+            "enabling after selected interval stops old stream");
+}
 void testFrameStore()
 {
     driver = {};
@@ -354,5 +392,6 @@ int main()
     testStreamDeadline();
     testCamera();
     testFrameStore();
+    testLivePolicy();
     std::puts("PASS: settings, measured rates, shared state, concurrency, camera lifecycle, shared JPEG ownership and snapshots");
 }

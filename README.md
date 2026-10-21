@@ -36,25 +36,28 @@ continue to read the actual DHCP URL from UART. A new build is required for
 each camera's identity; credentials are preserved when changing only the name.
 
 `auto_off` defaults to **true** and `auto_off_minutes` defaults to **20**.
-These `[wifi]` values are read when CMake generates the private header and are
-embedded into the firmware; changes require rebuilding and flashing. Older
-files without these keys get the same defaults. `auto_off` must be a TOML
-boolean and the duration a whole number of minutes from 1 to 71,582,788
-(the upper bound keeps seconds representable as a 32-bit unsigned value).
-The duration is validated even when automatic stop is disabled.
+The TOML duration must be a whole number from **5 to 120 minutes**, even when
+automatic stop is disabled. These values supply the boot defaults.
 
-With `auto_off = true`, every stream stops after the configured interval,
-including the initial wake period. A fresh Start gets the full interval;
-Apply settings never extends the deadline. The status bar shows remaining
-`MM:SS` from device time and a message containing the configured duration on
-expiry. With `auto_off = false`, it shows **Auto-off disabled**, with no timed
-stop; manual Stop, disconnect and error cleanup still work. Device enforcement
-does not depend on browser polling. Cleanup waits for any in-flight capture
-or send to return, then restores standby and Wi-Fi modem sleep.
-`/status` exposes `auto_off`, `auto_off_minutes`, `stream_limit_seconds`,
-`stream_remaining_seconds` (zero idle/disabled) and `stream_timed_out`
-(retained until the next stream starts). The configured seconds remain visible
-when disabled; use `auto_off` to distinguish unlimited streaming from expiry.
+The browser has an **Auto-off** checkbox and a **5–120 minute** slider. Toggling
+the checkbox or releasing the slider saves immediately through `POST /auto-off`.
+Changes are RAM-only and apply to the current MJPEG or RTSP session; reboot
+restores the compiled TOML defaults. They do not require reflashing.
+
+Timing stays anchored to the original stream start. Disabling removes the
+active deadline; enabling or shortening to an already elapsed interval stops
+the current stream. Changing camera resolution/quality does not reset it.
+Once Stop/timeout has been requested, policy edits cannot revive that session;
+start a new stream instead. Snapshot requests do not extend a deadline.
+The browser displays remaining `MM:SS`, or **Auto-off disabled**. Cleanup waits
+for an in-flight capture/send, then restores standby and Wi-Fi modem sleep.
+Device enforcement does not depend on status polling.
+
+`POST /auto-off` accepts exactly `auto_off=true&auto_off_minutes=20` (or false,
+5–120 minutes); malformed/out-of-range requests return 400 without applying.
+`/status` reports the effective `auto_off`, `auto_off_minutes`,
+`stream_limit_seconds`, `stream_remaining_seconds` (zero idle/disabled), and
+`stream_timed_out`. The timeout reason persists until a new stream starts.
 
 ## Browser stream
 
@@ -102,7 +105,7 @@ frame before network transmission. Three startup-allocated PSRAM buffers
 Each JPEG is bounded to 512 KiB; larger frames return an error instead of
 allocating more memory. One MJPEG viewer remains supported. Port 80 processes
 one snapshot at a time; an idle snapshot may briefly delay other page requests
-while the camera wakes. RTSP is not implemented yet.
+while the camera wakes. RTSP uses the same stream buffer and exclusive video session (see below).
 
 For openHAB's generic IP Camera Thing, use `/capture` as `snapshotUrl` and
 `:81/stream` as `mjpegUrl`. Let openHAB relay the stream to multiple viewers.
@@ -122,6 +125,81 @@ settings and stops the stream. On the replacement board, all five resolutions pa
 and 47 stream frames decoded, including simultaneous snapshot/stream access.
 Standby cleanup and countdown preservation passed; actual openHAB integration
 and full-duration auto-off expiry remain untested.
+
+## RTSP for VLC and FFmpeg
+
+The firmware provides a JPEG RTSP/RTP endpoint on TCP port 554:
+
+```text
+rtsp://<assigned-ip>:554/stream
+```
+
+For the replacement board's last observed DHCP address, this is
+`rtsp://192.168.1.128:554/stream`. Confirm its current address on UART.
+In a VLC build with Live555 RTSP support, use **Media > Open Network Stream**.
+UDP unicast and interleaved TCP are supported. To force TCP in such a VLC build
+or test with FFplay, use:
+
+```bash
+vlc --rtsp-tcp rtsp://192.168.1.128:554/stream
+ffplay -rtsp_transport tcp rtsp://192.168.1.128:554/stream
+```
+
+JPEG is transported according to RFC 2435 (static RTP payload type 26,
+90 kHz timestamps, explicit quantizers and fragments up to 1400 bytes).
+The OV2640's baseline 4:2:2/4:2:0 images with standard Huffman tables are
+supported; unsupported/malformed images cause a reported camera error.
+No H.264 encoding or audio is provided. RTSP captures are paced at at most
+10 frames/second; `/status` FPS and JPEG throughput measure actual complete
+sends, excluding RTP/RTCP overhead. Temporary UDP buffer-pressure errors are retried with a bounded delay,
+and TCP disables Nagle buffering for interleaved media. UDP counters measure successful sends,
+not receipt at the viewer; UDP loss can spoil individual frames.
+
+One active video session is allowed across RTSP and HTTP MJPEG. A competing
+HTTP stream receives 503; RTSP PLAY receives 453 while HTTP owns the camera.
+Only one RTSP control client is serviced at a time. Snapshots work during
+either stream. For multiple viewers, let openHAB or another host relay one
+camera connection. The web page remains available for settings, telemetry
+and Stop. RTSP follows the existing selected resolution/quality and compiled
+auto-off policy; snapshots and settings never extend the deadline.
+
+OPTIONS, DESCRIBE, SETUP, PLAY, PAUSE, TEARDOWN and GET_PARAMETER are
+implemented. PAUSE releases the camera; a later PLAY starts a new timed
+session. Disconnect, HTTP Stop or auto-off releases the camera and returns
+to standby. An idle control connection expires after 60 seconds without
+control/RTCP activity. TCP uses negotiated interleaved channels; UDP uses
+camera ports 5004/5005 and the client's negotiated RTP/RTCP ports. The SDK socket budget is 20 to cover both HTTP servers and RTSP/UDP. The UDP
+destination is always the control connection's peer. Multicast and
+authentication are not implemented. A client that automatically reconnects
+can start another timed session after auto-off.
+
+The installed Ubuntu VLC 3.0.23 was inspected and built with
+`--disable-live555`. Its SAT>IP/RealRTSP fallbacks cannot play this generic
+JPEG endpoint, and it does not recognize `--rtsp-tcp`. This was reproduced
+against the production server on host sockets. Use the installed FFplay for
+RTSP testing, or a VLC distribution with Live555 support. Firmware changes
+cannot supply a missing client decoder/access module.
+
+The existing `/capture` and HTTP MJPEG endpoints remain the simplest openHAB
+integration. RTSP can be supplied as `ffmpegInput` when needed, but openHAB must not
+hold direct RTSP and direct MJPEG connections simultaneously. Choose one
+upstream video connection and relay it on the host; `/capture` can coexist
+with either. Compatibility with an actual openHAB installation is untested.
+
+Host socket tests run the production server and capture worker with synthetic
+JPEGs: FFmpeg decodes TCP/UDP, and tests cover control framing, pause/resume,
+reconnect, concurrent snapshots, busy ownership, Stop and a shortened deadline.
+Hardware RTSP acceptance is pending. After flashing and reading DHCP from UART:
+
+```bash
+python3 tools/check_rtsp.py http://<assigned-ip>/
+python3 tools/check_camera.py http://<assigned-ip>/
+```
+
+The first check requires FFmpeg and Pillow and tests all five resolutions over
+TCP and UDP, simultaneous snapshots, busy HTTP rejection, actual FPS and Stop.
+The second repeats HTTP MJPEG/snapshot acceptance. Both restore the original
+settings and leave the camera in standby.
 
 ## Resolution, quality, and standby
 

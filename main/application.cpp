@@ -30,6 +30,7 @@ esp_err_t Application::run() noexcept
     result = frames_.start();
     if (result != ESP_OK) { return result; }
     result = web_.start();
+    if (result == ESP_OK) { result = rtsp_.start(); }
     if (result == ESP_OK) {
         network_.logUrl();
     }

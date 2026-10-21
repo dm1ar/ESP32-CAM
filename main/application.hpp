@@ -5,6 +5,7 @@
 #include "network.hpp"
 #include "shared_state.hpp"
 #include "web_server.hpp"
+#include "rtsp_server.hpp"
 
 namespace cam {
 // One application has static lifetime. Member declaration order guarantees
@@ -21,6 +22,7 @@ private:
     SharedState state_{Network::streamPolicy()};
     FrameService frames_{camera_, state_};
     WebServer web_;
+    RtspServer rtsp_{frames_, state_};
 };
 } // namespace cam
 #endif

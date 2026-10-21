@@ -48,7 +48,7 @@ class WifiConfigTests(unittest.TestCase):
         self.assertIn("APP_AUTO_OFF = true;", header)
         self.assertIn("APP_AUTO_OFF_MINUTES = 20U;", header)
         for enabled in ["true", "false"]:
-            for minutes in [1, 7, 20, 60, 71582788]:
+            for minutes in [5, 7, 20, 60, 120]:
                 with self.subTest(enabled=enabled, minutes=minutes):
                     header = self.generate(f"auto_off = {enabled}\nauto_off_minutes = {minutes}\n")
                     self.assertIn(f"APP_AUTO_OFF = {enabled};", header)
@@ -60,7 +60,7 @@ class WifiConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as error:
                     self.generate(f"auto_off = {value}\n")
                 self.assertNotIn("dummy-password", str(error.exception))
-        for value in ['true', 'false', '0', '-1', '71582789', '20.0', '"20"', '[]']:
+        for value in ['true', 'false', '0', '-1', '4', '121', '71582789', '20.0', '"20"', '[]']:
             for enabled in ["true", "false"]:
                 with self.subTest(minutes=value, enabled=enabled):
                     with self.assertRaises(ValueError):

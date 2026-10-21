@@ -13,6 +13,7 @@ classDiagram
         -Network network_
         -Camera camera_
         -SharedState state_
+        -RtspServer rtsp_
         -FrameService frames_
         -WebServer web_
         +run() esp_err_t
@@ -58,6 +59,25 @@ classDiagram
     class CriticalSection {
         -portMUX_TYPE lock_
         +~CriticalSection()
+    }
+    class RtspServer {
+        -FrameService frames_
+        -SharedState state_
+        -listener_
+        +start() esp_err_t
+    }
+    class RtspSession {
+        -client_
+        -RTP socket
+        -RTCP socket
+        -transport
+        +run() void
+    }
+    class Packetizer {
+        -Jpeg jpeg_
+        -offset_
+        -sequence_
+        +next(packet) size_t
     }
     class FrameService {
         -FrameStore store_
@@ -148,6 +168,11 @@ classDiagram
     Application *-- Camera
     Application *-- SharedState
     Application *-- WebServer
+    Application *-- RtspServer
+    RtspServer ..> RtspSession : one client at a time
+    RtspSession --> FrameService : queued owner requests
+    RtspSession --> SharedState : actual sends and Stop
+    RtspSession ..> Packetizer : per frame
     Application *-- FrameService
     FrameService *-- FrameStore
     FrameStore *-- JpegBuffer
@@ -185,6 +210,7 @@ explicit runtime cleanup boundary.
 | ESP-IDF event loop | Wi-Fi connect/reconnect, DHCP URL logging, connection event bit | Wi-Fi API only |
 | HTTP server on port 80 | HTML, health, telemetry, settings validation, Stop and snapshot requests | Read-only system/Wi-Fi queries; no camera calls |
 | HTTP server on port 81 | One blocking MJPEG session, sends independent frame copies | No direct camera access |
+| RTSP task on TCP 554 | One RTSP control client, SDP, UDP/TCP RTP/JPEG and RTCP | No direct camera access |
 | Capture worker `camera_owner` | Serializes session boundaries, settings, capture, frame copies and standby | Sole camera owner after boot |
 | Browser | Start/Stop/Apply controls and status presentation | HTTP only |
 
@@ -302,7 +328,7 @@ host, UART URL message, browser and status JSON. No mDNS service is added.
 The configuration generator validates boolean/integer types and duration
 bounds before generating C++ constants. `Network::streamPolicy()` supplies
 those compiled values to `Application` and `SharedState` at startup; they
-cannot be changed through browser controls. `StreamPolicy` contains the
+supply the boot defaults and can be changed in RAM through browser controls. `StreamPolicy` contains the
 enabled flag and limit in seconds.
 
 `SharedState::begin()` stores a device-monotonic deadline of start + the
@@ -348,3 +374,76 @@ application beginning at `0x10000`, within the verified 4 MB flash. It keeps
 the existing NVS and PHY regions; it does not provide OTA. Full flashing
 updates the partition table along with the app. `dependencies.lock` retains
 camera 2.1.7, JPEG 1.3.1 and IDF 6.1.0.
+
+
+## RTSP transport and video ownership
+
+RtspServer starts a process-lifetime FreeRTOS task and TCP listener on port 554.
+One RtspSession at a time owns its control socket and optional UDP RTP/RTCP
+sockets through scoped Socket guards. Requests and interleaved RTCP are framed
+in a fixed 4096-byte input buffer; request bodies are limited to 1024 bytes.
+Protocol parsing and RTP/JPEG packet construction live in the host-testable
+rtsp_protocol module. Recognized headers reject duplicates, CSeq is parsed as
+an unsigned integer, URI paths are fixed and transport ranges are checked
+before narrowing. Unsupported multicast/destination parameters are rejected.
+
+FrameService::begin serializes the exclusive video claim with snapshot and
+cleanup requests. If another video session is active, begin returns invalid
+state and the rejected caller must not perform finish. HTTP responds 503;
+RTSP PLAY responds 453. Snapshots remain independent. Capture, packetization
+and socket transmission finish before that caller requests its next stream
+copy; no other task writes that output while it is sent.
+
+RTSP sends RFC 2435 JPEG payloads (type 26), using camera quantization tables,
+standard Huffman table fingerprints, validated baseline sampling/dimensions,
+and entropy scan data without the JPEG file header. Packets are at most
+1400 bytes, offsets refer to scan bytes and the final packet sets the RTP
+marker. One 90 kHz timestamp is shared by all fragments of a frame. UDP sends
+are yielded after each eight packets. A completed frame contributes its original
+JPEG byte count to the same measured RateMeter used by MJPEG; it does not count
+wire overhead or guarantee UDP delivery. Capture pacing caps RTSP at 10 FPS.
+
+SDP advertises one JPEG video track; SETUP negotiates UDP unicast or interleaved
+TCP. The destination is the control peer. UDP local ports are 5004/5005. RTCP
+sender reports and source descriptions are sent every five seconds; BYE is sent
+on final termination. RTCP uses system wall time (no NTP synchronization is
+added here), while media/session timing uses the monotonic ESP timer. RTSP
+control/RTCP keepalive has a 60-second inactivity limit. PAUSE releases video
+ownership, and resumed PLAY begins a new auto-off interval. HTTP Stop and the
+compiled auto-off deadline also end RTSP and use worker standby cleanup.
+
+No audio, authentication, multicast, H.264 transcoding or concurrent video
+sessions are added. Host socket tests use the real server and queue worker on
+port 8554 with POSIX adapters and synthetic JPEGs; firmware uses 554. An actual
+camera, network and independent decoder are required for hardware acceptance.
+
+The SDK socket budget is explicitly 20. Each HTTP server consumes a listener,
+control socket and message socket (six infrastructure sockets total), plus
+up to three client sockets per server. RTSP adds listener/control and UDP
+RTP/RTCP sockets. Twenty covers the configured maximum of sixteen with
+headroom; the SDK default of ten is insufficient for concurrent page access
+and UDP RTSP. UDP allocation/configuration errors are logged with errno.
+
+Hardware checks under weak Wi-Fi also showed premature UDP termination with
+no capture error. A bounded retry path now handles ENOMEM/ENOBUFS/EAGAIN/
+EWOULDBLOCK/EINTR (up to fifty 10 ms delays per datagram), with Stop/deadline
+checks and fatal errno logging. TCP uses TCP_NODELAY for small interleaved
+headers. Host UDP adapters inject ENOMEM to exercise recovery. The hardware
+acceptance tool bounds FFmpeg startup probing to 1 second/32 KiB; this does
+not change media or telemetry FPS. SDP advertises the 10 FPS capture ceiling.
+
+## Live auto-off policy
+
+The checkbox and 5–120 minute slider POST a complete two-field form to
+/auto-off on port 80. Browser polling preserves unsaved/in-flight edits,
+invalidates pre-command responses, and displays a save error without losing
+the draft. TOML boot defaults remain true/20 minutes with the same duration
+range; accepted browser changes are RAM-only.
+
+SharedState::setPolicy validates under a short critical section, evaluates
+the old deadline before changing policy, and computes the new deadline from
+streamStartedUs. It never clears an existing Stop request. Disabling clears
+the deadline; enabling a duration shorter than elapsed time requests timeout.
+The stream owner observes the same state for MJPEG/RTSP. Camera settings and
+snapshots never change the timer. Tests cover range/type rejection, start
+anchoring, enable/disable, shortening, sticky Stop, browser drafts and errors.
